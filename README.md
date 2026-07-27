@@ -1,1 +1,5 @@
-# SpyDialTest
+# Dialog Spy
+
+Стартовый Python-репозиторий сервиса архива Telegram Business.
+
+В репозитории размещён исходный архив `dialog-spy-python-mvp.zip`. После клонирования распакуйте его в текущую директорию.
