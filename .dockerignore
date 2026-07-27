@@ -1,0 +1,9 @@
+.env
+.git
+.gitignore
+__pycache__
+*.pyc
+.pytest_cache
+.venv
+dialog-spy-python-mvp.zip
+release-0.3.0-parts
