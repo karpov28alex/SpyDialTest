@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import text
 
+from app.api.routes.admin import router as admin_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.user import router as user_router
 from app.api.routes.webhook import router as webhook_router
@@ -35,6 +36,7 @@ app.add_middleware(
 )
 app.include_router(auth_router)
 app.include_router(user_router)
+app.include_router(admin_router)
 app.include_router(webhook_router)
 
 
