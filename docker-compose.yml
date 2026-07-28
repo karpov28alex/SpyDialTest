@@ -1,56 +1,110 @@
+name: dialog-spy
+
+x-app-common: &app-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file:
+    - .env
+  restart: unless-stopped
+  init: true
+  networks:
+    - backend
+
 services:
   postgres:
     image: postgres:17-alpine
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: dialog_spy
-      POSTGRES_USER: dialog_spy
-      POSTGRES_PASSWORD: dialog_spy
+      POSTGRES_DB: ${POSTGRES_DB:-dialog_spy}
+      POSTGRES_USER: ${POSTGRES_USER:-dialog_spy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U dialog_spy -d dialog_spy"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dialog_spy} -d ${POSTGRES_DB:-dialog_spy}"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 12
+      start_period: 10s
+    networks:
+      - backend
 
   redis:
     image: redis:7-alpine
-    command: redis-server --appendonly yes
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     volumes:
       - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 10
+      retries: 12
+      start_period: 5s
+    networks:
+      - backend
+
+  migrate:
+    <<: *app-common
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   api:
-    build: .
-    env_file: .env
-    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    <<: *app-common
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --proxy-headers
+      - --forwarded-allow-ips=*
     volumes:
       - media_data:/data/media
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
   worker:
-    build: .
-    env_file: .env
-    command: python -m app.worker.runner
+    <<: *app-common
+    command: ["python", "-m", "app.worker.runner"]
     volumes:
       - media_data:/data/media
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; raise SystemExit(0 if os.path.exists('/proc/1') else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+networks:
+  backend:
+    driver: bridge
 
 volumes:
   postgres_data:
+    name: dialog-spy_postgres_data
   redis_data:
+    name: dialog-spy_redis_data
   media_data:
+    name: dialog-spy_media_data
