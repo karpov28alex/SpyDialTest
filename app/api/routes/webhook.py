@@ -16,7 +16,7 @@ from app.business.events import (
     protected_reply_is_allowed,
 )
 from app.core.config import get_settings
-from app.db.models import Dialog, FailedUpdate, Media, Message, MessageVersion, User, UserSettings
+from app.db.models import BusinessConnection, Dialog, FailedUpdate, Media, Message, MessageVersion, User, UserSettings
 from app.db.session import SessionLocal
 from app.services.queue import enqueue_job
 from app.services.telegram_updates import (
@@ -49,9 +49,22 @@ async def _owner_context(session, message: Message) -> tuple[User, Dialog, UserS
     return user, dialog, prefs
 
 
+async def _preferences_for_connection(session, connection_id: str) -> UserSettings | None:
+    return await session.scalar(
+        select(UserSettings)
+        .join(BusinessConnection, BusinessConnection.owner_user_id == UserSettings.user_id)
+        .where(BusinessConnection.telegram_connection_id == connection_id)
+    )
+
+
 async def _queue_connection_notification(session, *, update_id: int, connection) -> None:
     user = await session.get(User, connection.owner_user_id)
-    if not user or not user.settings or not user.settings.notify_connection:
+    if (
+        not user
+        or not user.settings
+        or not user.settings.notifications_enabled
+        or not user.settings.notify_connection
+    ):
         return
     text = (
         "✅ <b>Telegram Business подключён</b>\n\nDialog Spy начал сохранять поддерживаемые бизнес-диалоги."
@@ -81,14 +94,16 @@ async def _queue_media_downloads(session, message: Message) -> list[Media]:
 
 
 async def _persist_embedded_reply(session, event) -> None:
-    """Persist a protected/view-once reply target embedded in a BusinessMessage.
-
-    Telegram can omit a standalone update for ephemeral media but still include the
-    replied-to message in reply_to_message. We copy the parent business connection
-    id and archive that target before processing the user's reply.
-    """
+    """Archive a protected/view-once reply target only when the owner enabled it."""
     target = event.reply_to_message
     if target is None or not event.business_connection_id:
+        return
+    prefs = await _preferences_for_connection(session, event.business_connection_id)
+    if prefs is None or not prefs.save_protected_media:
+        logger.info(
+            "protected_media_capture_disabled",
+            business_connection_id=event.business_connection_id,
+        )
         return
     decision = is_protected_message(target)
     if not decision.allowed:
@@ -111,6 +126,12 @@ async def _persist_embedded_reply(session, event) -> None:
 
 async def _queue_protected_reply(session, reply_message: Message) -> None:
     if reply_message.reply_to_message_id is None:
+        return
+    context = await _owner_context(session, reply_message)
+    if context is None:
+        return
+    user, dialog, prefs = context
+    if not prefs.save_protected_media:
         return
     protected = await session.scalar(
         select(Media)
@@ -140,10 +161,10 @@ async def _queue_protected_reply(session, reply_message: Message) -> None:
             reason=decision.reason,
         )
         return
-    context = await _owner_context(session, reply_message)
-    if context is None or not context[2].notify_protected_media:
+    # The media remains available in Mini App when capture is enabled. Telegram
+    # delivery additionally obeys the master notification switch.
+    if not prefs.notifications_enabled or not prefs.notify_protected_media:
         return
-    user, dialog, _ = context
     await enqueue_job(
         session,
         redis,
@@ -157,11 +178,10 @@ async def _queue_protected_reply(session, reply_message: Message) -> None:
     )
 
 
-@router.post("/telegram/webhook/{secret}", status_code=200)
-async def telegram_webhook(
+async def _handle_webhook(
     secret: str,
     request: Request,
-    x_telegram_bot_api_secret_token: str | None = Header(default=None),
+    x_telegram_bot_api_secret_token: str | None,
 ) -> dict[str, bool]:
     if secret != settings.telegram_webhook_secret and x_telegram_bot_api_secret_token != settings.telegram_webhook_secret:
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -198,7 +218,7 @@ async def telegram_webhook(
                 message, changed, _ = await edit_business_message(session, update.edited_business_message)
                 if message and changed:
                     context = await _owner_context(session, message)
-                    if context and context[2].notify_edits:
+                    if context and context[2].notifications_enabled and context[2].notify_edits:
                         user, dialog, prefs = context
                         versions = list(
                             (
@@ -229,7 +249,7 @@ async def telegram_webhook(
                     if message is None:
                         continue
                     context = await _owner_context(session, message)
-                    if context and context[2].notify_deletions:
+                    if context and context[2].notifications_enabled and context[2].notify_deletions:
                         user, dialog, prefs = context
                         await enqueue_job(
                             session,
@@ -264,3 +284,21 @@ async def telegram_webhook(
                 )
             )
         return {"ok": True}
+
+
+@router.post("/telegram/webhook/{secret}", status_code=200)
+async def telegram_webhook(
+    secret: str,
+    request: Request,
+    x_telegram_bot_api_secret_token: str | None = Header(default=None),
+) -> dict[str, bool]:
+    return await _handle_webhook(secret, request, x_telegram_bot_api_secret_token)
+
+
+@router.post("/api/telegram/webhook/{secret}", status_code=200, include_in_schema=False)
+async def legacy_telegram_webhook(
+    secret: str,
+    request: Request,
+    x_telegram_bot_api_secret_token: str | None = Header(default=None),
+) -> dict[str, bool]:
+    return await _handle_webhook(secret, request, x_telegram_bot_api_secret_token)
