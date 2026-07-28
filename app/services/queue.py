@@ -1,4 +1,3 @@
-import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -19,9 +18,18 @@ async def enqueue_job(
     payload: dict[str, Any],
     idempotency_key: str,
 ) -> Job:
+    """Persist a job reliably.
+
+    PostgreSQL is the source of truth. We deliberately do not push the job ID
+    to Redis before the surrounding transaction commits: a worker could consume
+    that ID immediately and fail to see the uncommitted database row. The worker
+    continuously discovers committed queued jobs and then uses Redis only as a
+    wake-up/transport mechanism.
+    """
     existing = await session.scalar(select(Job).where(Job.idempotency_key == idempotency_key))
     if existing:
         return existing
+
     job = Job(
         kind=kind,
         payload=payload,
@@ -31,5 +39,4 @@ async def enqueue_job(
     )
     session.add(job)
     await session.flush()
-    await redis.lpush(QUEUE_KEY, json.dumps({"job_id": job.id}))
     return job
