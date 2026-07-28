@@ -13,6 +13,7 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.models import Job, Media, User
 from app.db.session import SessionLocal
+from app.services.broadcasts import send_broadcast
 from app.services.media import download_telegram_file, safe_media_path
 from app.services.queue import QUEUE_KEY
 
@@ -61,7 +62,6 @@ async def _deliver_protected_media(job: Job) -> None:
         )
         filename = media.filename or f"protected-{media.id}"
         file = FSInputFile(path, filename=filename)
-
         if media.media_type == "photo":
             await bot.send_photo(user.telegram_id, photo=file, caption=caption, protect_content=True)
         elif media.media_type in {"video", "animation"}:
@@ -77,19 +77,16 @@ async def _deliver_protected_media(job: Job) -> None:
             await bot.send_sticker(user.telegram_id, sticker=file, protect_content=True)
             await bot.send_message(user.telegram_id, caption)
         else:
-            await bot.send_document(
-                user.telegram_id,
-                document=file,
-                caption=caption,
-                protect_content=True,
-            )
+            await bot.send_document(user.telegram_id, document=file, caption=caption, protect_content=True)
 
 
 async def handle_job(job: Job) -> None:
     if job.kind == "send_text":
         await bot.send_message(job.payload["telegram_id"], job.payload["text"])
         return
-
+    if job.kind == "broadcast_send":
+        await send_broadcast(bot, job.payload)
+        return
     if job.kind == "download_media":
         async with SessionLocal() as session, session.begin():
             media = await session.get(Media, int(job.payload["media_id"]), with_for_update=True)
@@ -105,11 +102,9 @@ async def handle_job(job: Job) -> None:
             media.download_status = "downloaded"
             media.downloaded_at = datetime.now(UTC)
         return
-
     if job.kind in {"send_protected_media", "deliver_protected_media"}:
         await _deliver_protected_media(job)
         return
-
     raise RuntimeError(f"Unknown job kind: {job.kind}")
 
 
@@ -127,7 +122,6 @@ async def process_job(job_id: int, redis: Redis) -> None:
         job.status = "running"
         job.locked_at = datetime.now(UTC)
         job.attempts += 1
-
     try:
         async with SessionLocal() as session:
             job = await session.get(Job, job_id)
@@ -148,11 +142,11 @@ async def process_job(job_id: int, redis: Redis) -> None:
                 job.status = "dead"
                 job.last_error = str(exc)
                 job.locked_at = None
-            telegram_id = job.payload.get("telegram_id") if job else None
-            if telegram_id:
-                user = await session.scalar(select(User).where(User.telegram_id == telegram_id))
-                if user:
-                    user.blocked_bot_at = datetime.now(UTC)
+                telegram_id = job.payload.get("telegram_id")
+                if telegram_id:
+                    user = await session.scalar(select(User).where(User.telegram_id == telegram_id))
+                    if user:
+                        user.blocked_bot_at = datetime.now(UTC)
     except TelegramBadRequest as exc:
         await reschedule(job_id, str(exc))
     except Exception as exc:
