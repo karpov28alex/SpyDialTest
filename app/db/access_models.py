@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import Boolean, DateTime, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base
 
 
-class AppMonetizationSettings(Base, TimestampMixin):
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+class AppMonetizationSettings(Base):
     """Singleton configuration for access, trial and test payment presentation."""
 
     __tablename__ = "app_monetization_settings"
@@ -27,3 +31,5 @@ class AppMonetizationSettings(Base, TimestampMixin):
     )
     updated_by: Mapped[str | None] = mapped_column(String(255))
     updated_at_override: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
