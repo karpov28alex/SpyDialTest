@@ -7,6 +7,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from redis.asyncio import Redis
 from sqlalchemy import select
 
+from app.bot.admin_handlers import router as admin_router
 from app.bot.handlers import router as command_router
 from app.bot.setup import bot, dispatcher
 from app.business.events import (
@@ -32,6 +33,7 @@ from app.services.telegram_updates import (
 router = APIRouter(tags=["telegram"])
 settings = get_settings()
 logger = structlog.get_logger()
+dispatcher.include_router(admin_router)
 dispatcher.include_router(command_router)
 redis = Redis.from_url(settings.redis_url, decode_responses=True)
 
