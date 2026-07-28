@@ -18,7 +18,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-dialog_spy}
       POSTGRES_USER: ${POSTGRES_USER:-dialog_spy}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dialog_spy}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
