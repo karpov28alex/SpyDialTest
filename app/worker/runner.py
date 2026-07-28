@@ -86,7 +86,7 @@ async def handle_job(job: Job) -> None:
 async def process_job(job_id: int) -> None:
     async with SessionLocal() as session, session.begin():
         job = await session.scalar(select(Job).where(Job.id == job_id).with_for_update(skip_locked=True))
-        if not job or job.status in {"done", "dead"} or job.available_at > datetime.now(UTC):
+        if not job or job.status in {"done", "dead", "running"} or job.available_at > datetime.now(UTC):
             return
         job.status = "running"
         job.locked_at = datetime.now(UTC)
@@ -116,14 +116,12 @@ async def process_job(job_id: int) -> None:
                 if user:
                     user.blocked_bot_at = datetime.now(UTC)
     except TelegramBadRequest as exc:
-        # TelegramBadRequest может быть временным для ещё не скачанного файла.
         await reschedule(job_id, str(exc))
     except Exception as exc:
         await reschedule(job_id, str(exc))
 
 
 async def reschedule(job_id: int, error: str, delay: int | None = None) -> None:
-    redis = Redis.from_url(settings.redis_url, decode_responses=True)
     async with SessionLocal() as session, session.begin():
         job = await session.get(Job, job_id, with_for_update=True)
         if not job:
@@ -131,16 +129,18 @@ async def reschedule(job_id: int, error: str, delay: int | None = None) -> None:
         if job.attempts >= job.max_attempts:
             job.status = "dead"
         else:
-            delay = delay or min(2 ** job.attempts, 300)
+            retry_delay = delay or min(2 ** job.attempts, 300)
             job.status = "queued"
-            job.available_at = datetime.now(UTC) + timedelta(seconds=delay)
-            await redis.lpush(QUEUE_KEY, json.dumps({"job_id": job.id}))
+            job.available_at = datetime.now(UTC) + timedelta(seconds=retry_delay)
         job.last_error = error
-    await redis.aclose()
 
 
-async def recover_queued_jobs(redis: Redis) -> None:
-    """Подбирает задания, потерянные из-за гонки commit PostgreSQL / Redis."""
+async def recover_queued_jobs(redis: Redis) -> int:
+    """Push committed queued jobs to Redis.
+
+    This runs every loop, not only after a Redis timeout, so database jobs cannot
+    remain stranded behind stale queue entries.
+    """
     async with SessionLocal() as session:
         ids = list((await session.scalars(
             select(Job.id)
@@ -150,6 +150,7 @@ async def recover_queued_jobs(redis: Redis) -> None:
         )).all())
     for job_id in ids:
         await redis.lpush(QUEUE_KEY, json.dumps({"job_id": job_id}))
+    return len(ids)
 
 
 async def main() -> None:
@@ -157,13 +158,12 @@ async def main() -> None:
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     logger.info("worker_started", version=settings.app_version, git_sha=settings.git_sha)
     while True:
-        item = await redis.brpop(QUEUE_KEY, timeout=3)
         try:
+            await recover_queued_jobs(redis)
+            item = await redis.brpop(QUEUE_KEY, timeout=2)
             if item:
                 payload = json.loads(item[1])
                 await process_job(int(payload["job_id"]))
-            else:
-                await recover_queued_jobs(redis)
         except Exception:
             logger.exception("worker_loop_error")
             await asyncio.sleep(1)
