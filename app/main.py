@@ -9,6 +9,7 @@ from sqlalchemy import text
 
 from app.api.routes.admin import router as admin_router
 from app.api.routes.auth import router as auth_router
+from app.api.routes.avatar import router as avatar_router
 from app.api.routes.user import router as user_router
 from app.api.routes.webhook import router as webhook_router
 from app.api.routes.webhook_compat import router as webhook_compat_router
@@ -37,6 +38,7 @@ app.add_middleware(
 )
 app.include_router(auth_router)
 app.include_router(user_router)
+app.include_router(avatar_router)
 app.include_router(admin_router)
 app.include_router(webhook_router)
 app.include_router(webhook_compat_router)
