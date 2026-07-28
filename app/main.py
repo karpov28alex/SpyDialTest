@@ -8,6 +8,7 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 
 from app.api.routes.admin import router as admin_router
+from app.api.routes.admin_monetization import router as admin_monetization_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.avatar import router as avatar_router
 from app.api.routes.user import router as user_router
@@ -40,6 +41,7 @@ app.include_router(auth_router)
 app.include_router(user_router)
 app.include_router(avatar_router)
 app.include_router(admin_router)
+app.include_router(admin_monetization_router)
 app.include_router(webhook_router)
 app.include_router(webhook_compat_router)
 
@@ -56,17 +58,7 @@ async def correlation_middleware(request: Request, call_next):
 
 @app.exception_handler(Exception)
 async def unhandled_error(request: Request, _: Exception) -> JSONResponse:
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": {
-                "code": "INTERNAL_ERROR",
-                "message": "Внутренняя ошибка",
-                "details": {},
-                "correlation_id": request.headers.get("x-correlation-id", "unknown"),
-            }
-        },
-    )
+    return JSONResponse(status_code=500, content={"error": {"code": "INTERNAL_ERROR", "message": "Внутренняя ошибка", "details": {}, "correlation_id": request.headers.get("x-correlation-id", "unknown")}})
 
 
 @app.get("/health/live")
