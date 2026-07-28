@@ -46,6 +46,8 @@ class User(Base, TimestampMixin):
 class UserSettings(Base, TimestampMixin):
     __tablename__ = "user_settings"
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    notifications_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    save_protected_media: Mapped[bool] = mapped_column(Boolean, default=True)
     notify_edits: Mapped[bool] = mapped_column(Boolean, default=True)
     notify_deletions: Mapped[bool] = mapped_column(Boolean, default=True)
     notify_protected_media: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -218,56 +220,9 @@ class Broadcast(Base, TimestampMixin):
 class BroadcastRecipient(Base):
     __tablename__ = "broadcast_recipients"
     __table_args__ = (UniqueConstraint("broadcast_id", "user_id"),)
-    id: Mapped[int] = mapped_column(primary_key=True)
-    broadcast_id: Mapped[int] = mapped_column(ForeignKey("broadcasts.id", ondelete="CASCADE"), index=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    broadcast_id: Mapped[int] = mapped_column(ForeignKey("broadcasts.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
     status: Mapped[str] = mapped_column(String(32), default="pending")
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(Text)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
-class BotContent(Base, TimestampMixin):
-    __tablename__ = "bot_content"
-    key: Mapped[str] = mapped_column(String(64), primary_key=True)
-    text: Mapped[str | None] = mapped_column(Text)
-    media_file_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
-    version: Mapped[int] = mapped_column(Integer, default=1)
-    updated_by: Mapped[int | None] = mapped_column(ForeignKey("admins.id"))
-
-
-class Admin(Base, TimestampMixin):
-    __tablename__ = "admins"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    telegram_id: Mapped[int | None] = mapped_column(BigInteger, unique=True)
-    email: Mapped[str | None] = mapped_column(String(320), unique=True)
-    password_hash: Mapped[str | None] = mapped_column(Text)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-
-
-class AdminAudit(Base):
-    __tablename__ = "admin_audit"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    admin_id: Mapped[int | None] = mapped_column(ForeignKey("admins.id"), index=True)
-    action: Mapped[str] = mapped_column(String(128))
-    object_type: Mapped[str | None] = mapped_column(String(64))
-    object_id: Mapped[str | None] = mapped_column(String(128))
-    before_data: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    after_data: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    ip: Mapped[str | None] = mapped_column(String(64))
-    correlation_id: Mapped[str] = mapped_column(String(64), index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-
-
-class Job(Base, TimestampMixin):
-    __tablename__ = "jobs"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    kind: Mapped[str] = mapped_column(String(64), index=True)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
-    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
-    attempts: Mapped[int] = mapped_column(Integer, default=0)
-    max_attempts: Mapped[int] = mapped_column(Integer, default=8)
-    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_error: Mapped[str | None] = mapped_column(Text)
-    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True)
