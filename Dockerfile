@@ -21,7 +21,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN addgroup --system app \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/* \
+    && addgroup --system app \
     && adduser --system --ingroup app app \
     && mkdir -p /data/media \
     && chown -R app:app /data /app
