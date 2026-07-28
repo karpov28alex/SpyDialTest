@@ -27,12 +27,15 @@ function polishSubscription(root) {
   const href = paymentHref(page);
   page.dataset.subscriptionPolished = '1';
   page.innerHTML = `
-    <section class="settings-card">
-      <h3>VIP-подписка</h3>
-      <p><b>👉 Стоимость пробной VIP подписки — 1 ₽ за 1 день VIP статуса.</b></p>
-      <p>Выбирая любой из тарифов, вы соглашаетесь с автоматической пролонгацией 299 ₽ каждые 3 дня по истечению оплаченного периода. Возможно частичное списание 99 ₽ за 1 день VIP статуса.</p>
-      <p>Продолжая оплату, вы соглашаетесь с <a href="https://sms.evocloud.su/terms" target="_blank" rel="noopener noreferrer">условиями пользования</a>.</p>
-      <a class="retry" href="${href}" target="_blank" rel="noopener noreferrer">Продолжить оплату</a>
+    <section class="settings-card subscription-card">
+      <div class="subscription-card__glow" aria-hidden="true"></div>
+      <div class="subscription-card__content">
+        <h3>VIP-подписка</h3>
+        <p class="subscription-lead"><b>👉 Стоимость пробной VIP подписки — 1 ₽ за 1 день VIP статуса.</b></p>
+        <p class="subscription-copy">Выбирая любой из тарифов, вы соглашаетесь с автоматической пролонгацией 299 ₽ каждые 3 дня по истечению оплаченного периода. Возможно частичное списание 99 ₽ за 1 день VIP статуса.</p>
+        <p class="subscription-terms">Продолжая оплату, вы соглашаетесь с <a href="https://sms.evocloud.su/terms" target="_blank" rel="noopener noreferrer">условиями пользования</a>.</p>
+        <a class="retry subscription-pay" href="${href}" target="_blank" rel="noopener noreferrer">Продолжить оплату</a>
+      </div>
     </section>
   `;
 }
