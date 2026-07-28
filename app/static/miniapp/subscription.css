@@ -1,0 +1,113 @@
+.subscription-card{
+  position:relative;
+  overflow:hidden;
+  margin-top:28px;
+  padding:0;
+  border:1px solid color-mix(in srgb,var(--accent2) 72%,var(--line));
+  border-radius:30px;
+  background:
+    linear-gradient(145deg,color-mix(in srgb,var(--surface2) 88%,#3b1762 12%),var(--surface));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb,var(--accent2) 16%,transparent),
+    0 18px 50px rgba(0,0,0,.28),
+    0 0 34px color-mix(in srgb,var(--accent) 16%,transparent);
+}
+.subscription-card__glow{
+  position:absolute;
+  width:240px;
+  height:240px;
+  right:-110px;
+  top:-125px;
+  border-radius:50%;
+  background:color-mix(in srgb,var(--accent2) 20%,transparent);
+  filter:blur(34px);
+  pointer-events:none;
+}
+.subscription-card__content{
+  position:relative;
+  z-index:1;
+  padding:30px 28px 28px;
+}
+.subscription-card h3{
+  margin:0 0 28px;
+  font-size:24px;
+  line-height:1.15;
+  letter-spacing:-.3px;
+}
+.subscription-lead{
+  margin:0 0 26px;
+  font-size:20px;
+  line-height:1.42;
+}
+.subscription-copy{
+  margin:0 0 30px;
+  font-size:17px;
+  line-height:1.55;
+  color:color-mix(in srgb,var(--text) 92%,var(--muted));
+}
+.subscription-terms{
+  margin:0;
+  padding-top:24px;
+  border-top:1px solid color-mix(in srgb,var(--accent2) 28%,var(--line));
+  font-size:16px;
+  line-height:1.5;
+  color:var(--muted);
+}
+.subscription-terms a{
+  color:color-mix(in srgb,var(--accent2) 86%,white 14%);
+  text-underline-offset:4px;
+}
+.subscription-pay{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  width:100%;
+  min-height:58px;
+  margin:34px 0 0;
+  padding:15px 22px;
+  border:1px solid color-mix(in srgb,var(--accent2) 72%,transparent);
+  border-radius:18px;
+  background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent2) 84%,var(--accent)));
+  color:#fff;
+  font-weight:800;
+  font-size:17px;
+  line-height:1.2;
+  text-align:center;
+  text-decoration:none;
+  box-shadow:
+    0 12px 30px color-mix(in srgb,var(--accent) 30%,transparent),
+    inset 0 1px 0 rgba(255,255,255,.18);
+}
+.subscription-pay:active{
+  transform:scale(.985);
+}
+@media(max-width:430px){
+  .subscription-card{
+    margin-top:20px;
+    border-radius:26px;
+  }
+  .subscription-card__content{
+    padding:27px 22px 24px;
+  }
+  .subscription-card h3{
+    margin-bottom:24px;
+    font-size:22px;
+  }
+  .subscription-lead{
+    margin-bottom:22px;
+    font-size:18px;
+  }
+  .subscription-copy{
+    margin-bottom:26px;
+    font-size:16px;
+  }
+  .subscription-terms{
+    padding-top:22px;
+    font-size:15px;
+  }
+  .subscription-pay{
+    min-height:56px;
+    margin-top:30px;
+    font-size:16px;
+  }
+}
