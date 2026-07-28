@@ -3,11 +3,11 @@ from __future__ import annotations
 import html
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Iterable
 
 from aiogram.types import Message as TgMessage
 
-from app.db.models import Dialog, Media, Message, UserSettings
+from app.db.models import Dialog, Media, Message, MessageVersion, UserSettings
 
 MAX_NOTIFICATION_CONTENT = 1400
 
@@ -33,27 +33,54 @@ def _icon(settings: UserSettings, value: str) -> str:
     return value if settings.notify_emoji else ""
 
 
+def _timestamp(value: datetime | None) -> str:
+    return (value or datetime.now(UTC)).astimezone(UTC).strftime("%d.%m.%Y · %H:%M:%S")
+
+
 def format_edit_notification(
     *,
     dialog: Dialog,
     settings: UserSettings,
-    old_content: str | None,
-    new_content: str | None,
-    edited_at: datetime | None,
+    message: Message,
+    versions: Iterable[MessageVersion],
 ) -> str:
-    title = f"{_icon(settings, '✏️ ')}<b>Сообщение изменено</b>"
+    title = f"{_icon(settings, '✏️ ')}<b>СООБЩЕНИЕ ИЗМЕНЕНО</b>"
     if settings.hide_preview:
         return (
-            f"{title}\n\n<b>Диалог:</b> {dialog_name(dialog)}\n\n"
-            "Откройте Dialog Spy, чтобы посмотреть оригинал и новую версию."
+            f"{title}\n━━━━━━━━━━━━━━━━━━\n"
+            f"👤 {dialog_name(dialog)}\n💬 <b>Диалог:</b> {dialog_name(dialog)}\n"
+            f"🕓 {_timestamp(message.edited_at)}\n\n"
+            "Откройте Dialog Spy, чтобы посмотреть все версии."
         )
-    timestamp = (edited_at or datetime.now(UTC)).astimezone(UTC).strftime("%d.%m.%Y · %H:%M UTC")
-    return (
-        f"{title}\n\n<b>Диалог:</b> {dialog_name(dialog)}\n"
-        f"<b>Время:</b> {timestamp}\n\n"
-        f"<b>Было:</b>\n<blockquote>{safe_content(old_content)}</blockquote>\n\n"
-        f"<b>Стало:</b>\n<blockquote>{safe_content(new_content)}</blockquote>"
+
+    parts = [
+        title,
+        "━━━━━━━━━━━━━━━━━━",
+        f"👤 {dialog_name(dialog)}",
+        f"💬 <b>Диалог:</b> {dialog_name(dialog)}",
+        f"🕓 {_timestamp(message.edited_at)}",
+        "",
+    ]
+    ordered = sorted(versions, key=lambda item: item.version_number)
+    for version in ordered:
+        parts.extend(
+            [
+                f"<b>Версия {version.version_number}</b>",
+                f"🕓 {_timestamp(version.created_at)}",
+                safe_content(version.text or version.caption),
+                "",
+            ]
+        )
+    parts.extend(
+        [
+            "<b>Текущая версия</b>",
+            f"🕓 {_timestamp(message.edited_at)}",
+            safe_content(message.text or message.caption),
+            "━━━━━━━━━━━━━━━━━━",
+            "Все версии сохранены в истории диалога.",
+        ]
     )
+    return "\n".join(parts)
 
 
 def format_delete_notification(*, dialog: Dialog, settings: UserSettings, message: Message) -> str:
@@ -63,35 +90,28 @@ def format_delete_notification(*, dialog: Dialog, settings: UserSettings, messag
         if settings.hide_preview
         else f"<blockquote>{safe_content(message.text or message.caption)}</blockquote>"
     )
-    sent_at = message.sent_at.astimezone(UTC).strftime("%d.%m.%Y · %H:%M UTC")
-    deleted_at = (
-        message.deleted_at.astimezone(UTC).strftime("%d.%m.%Y · %H:%M UTC")
-        if message.deleted_at
-        else "—"
-    )
     return (
         f"{title}\n\n<b>Диалог:</b> {dialog_name(dialog)}\n"
-        f"<b>Отправлено:</b> {sent_at}\n"
-        f"<b>Удалено:</b> {deleted_at}\n\n"
+        f"<b>Отправлено:</b> {_timestamp(message.sent_at)}\n"
+        f"<b>Удалено:</b> {_timestamp(message.deleted_at)}\n\n"
         f"<b>Сохранённое содержимое:</b>\n{saved}"
     )
 
 
 def is_protected_message(event: TgMessage) -> ProtectedMediaDecision:
-    """Classify only explicit Telegram protection/expiry signals.
-
-    A reply alone is never enough. Unknown future Bot API fields are inspected in
-    the raw model dump so support can be extended without weakening the invariant.
-    """
     if bool(event.has_protected_content):
         return ProtectedMediaDecision(True, "has_protected_content")
-
     raw: dict[str, Any] = event.model_dump(mode="python", exclude_none=True)
-    for key in ("self_destruct_type", "ttl_seconds", "media_ttl_seconds", "is_view_once"):
+    for key in (
+        "self_destruct_type",
+        "ttl_seconds",
+        "media_ttl_seconds",
+        "is_view_once",
+        "self_destruct_in",
+    ):
         value = raw.get(key)
         if value not in (None, False, 0, ""):
             return ProtectedMediaDecision(True, key)
-
     return ProtectedMediaDecision(False, "no_explicit_protection_signal")
 
 
