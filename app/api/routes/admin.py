@@ -32,6 +32,11 @@ class AdminLoginRequest(BaseModel):
     password: str
 
 
+def _database_now() -> datetime:
+    """Return UTC time compatible with the project's TIMESTAMP WITHOUT TIME ZONE columns."""
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
 async def admin_guard(
     authorization: Annotated[str | None, Header()] = None,
     settings: Settings = Depends(get_settings),
@@ -68,7 +73,7 @@ async def login(payload: AdminLoginRequest, settings: Settings = Depends(get_set
 
 @router.get("/dashboard")
 async def dashboard(_: AdminAuth, session: Session) -> dict:
-    now = datetime.now(UTC)
+    now = _database_now()
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     month = today.replace(day=1)
 
