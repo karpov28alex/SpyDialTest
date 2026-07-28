@@ -1,9 +1,10 @@
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import text
 
@@ -60,7 +61,17 @@ async def correlation_middleware(request: Request, call_next):
 
 @app.exception_handler(Exception)
 async def unhandled_error(request: Request, _: Exception) -> JSONResponse:
-    return JSONResponse(status_code=500, content={"error": {"code": "INTERNAL_ERROR", "message": "Внутренняя ошибка", "details": {}, "correlation_id": request.headers.get("x-correlation-id", "unknown")}})
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": "Внутренняя ошибка",
+                "details": {},
+                "correlation_id": request.headers.get("x-correlation-id", "unknown"),
+            }
+        },
+    )
 
 
 @app.get("/health/live")
@@ -85,14 +96,44 @@ async def mini_app() -> FileResponse:
 
 @app.get("/app/app.js", include_in_schema=False)
 async def mini_app_js() -> FileResponse:
-    return FileResponse("app/static/miniapp/app.js", media_type="application/javascript", headers={"Cache-Control": "public, max-age=31536000, immutable"})
+    return FileResponse(
+        "app/static/miniapp/app.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
+@app.get("/app/subscription-ui.js", include_in_schema=False)
+async def mini_app_subscription_ui() -> FileResponse:
+    return FileResponse(
+        "app/static/miniapp/subscription-ui.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @app.get("/app/style.css", include_in_schema=False)
 async def mini_app_css() -> FileResponse:
-    return FileResponse("app/static/miniapp/style.css", media_type="text/css", headers={"Cache-Control": "public, max-age=31536000, immutable"})
+    return FileResponse(
+        "app/static/miniapp/style.css",
+        media_type="text/css",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
+@app.get("/admin/monetization-ui.js", include_in_schema=False)
+async def admin_monetization_ui() -> FileResponse:
+    return FileResponse(
+        "app/static/admin/monetization-ui.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @app.get("/admin", include_in_schema=False)
-async def admin_page() -> FileResponse:
-    return FileResponse("app/static/admin/index.html", headers={"Cache-Control": "no-store"})
+async def admin_page() -> HTMLResponse:
+    html = Path("app/static/admin/index.html").read_text(encoding="utf-8")
+    marker = '<script src="/admin/monetization-ui.js?v=0.6.4" defer></script>'
+    if marker not in html:
+        html = html.replace("</body>", f"{marker}</body>")
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
