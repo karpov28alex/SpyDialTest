@@ -56,9 +56,19 @@ def keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="👮 Администраторы", callback_data="hotadmin:admins"),
             InlineKeyboardButton(text="⚠️ Ошибки", callback_data="hotadmin:errors"),
         ],
-        [InlineKeyboardButton(text="🌐 Открыть Web Admin", url=settings.admin_url)],
     ]
+    admin_url = str(getattr(settings, "admin_url", "") or "").strip()
+    if admin_url.startswith("https://"):
+        rows.append([InlineKeyboardButton(text="🌐 Открыть Web Admin", url=admin_url)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _safe_keyboard() -> InlineKeyboardMarkup | None:
+    try:
+        return keyboard()
+    except Exception:
+        logger.exception("admin_keyboard_failed")
+        return None
 
 
 async def _safe_scalar(statement, default=0):
@@ -117,25 +127,28 @@ async def admins_text() -> str:
     return "<b>Администраторы</b>\n\n" + "\n".join(lines)
 
 
-@router.message(Command("admin"))
+@router.message(F.text.regexp(r"^/admin(?:@[A-Za-z0-9_]+)?(?:\s|$)"))
 async def admin_command(message: Message) -> None:
     user_id = message.from_user.id if message.from_user else None
     if not await is_admin(user_id):
         await message.answer("Команда недоступна.")
         return
-    # First response is intentionally independent of DB metrics.
-    panel = await message.answer(
-        "<b>🛡 Админ-панель Dialog Spy</b>\n\nЗагружаю актуальную статистику…",
-        reply_markup=keyboard(),
-    )
+
+    # Critical invariant: answer before touching DB, Redis-backed metrics or keyboard URLs.
+    panel = await message.answer("🛡 Админ-панель открыта. Загружаю данные…")
+    reply_markup = await _safe_keyboard()
     try:
-        await panel.edit_text(await stats_text(), reply_markup=keyboard())
+        await panel.edit_text(await stats_text(), reply_markup=reply_markup)
     except Exception:
         logger.exception("admin_panel_render_failed", user_id=user_id)
-        await message.answer(
-            "Панель открыта. Статистика временно недоступна, но команды управления работают.",
-            reply_markup=keyboard(),
-        )
+        try:
+            await message.answer(
+                "🛡 Админ-панель доступна. Статистика временно недоступна.",
+                reply_markup=reply_markup,
+            )
+        except Exception:
+            logger.exception("admin_panel_fallback_failed", user_id=user_id)
+            await message.answer("🛡 Админ-панель доступна. Используйте /admins и /broadcast.")
 
 
 @router.message(Command("admin_id"))
@@ -168,7 +181,7 @@ async def admin_add_command(message: Message, command: CommandObject) -> None:
     await message.answer(
         f"✅ <code>{target_id}</code> назначен администратором.\n"
         "Он не сможет удалить или изменить владельца.",
-        reply_markup=keyboard(),
+        reply_markup=await _safe_keyboard(),
     )
 
 
@@ -196,7 +209,7 @@ async def admin_remove_command(message: Message, command: CommandObject) -> None
         await redis.aclose()
     await message.answer(
         ("✅ Администратор удалён." if removed else "Администратор не найден."),
-        reply_markup=keyboard(),
+        reply_markup=await _safe_keyboard(),
     )
 
 
@@ -206,7 +219,7 @@ async def admins_command(message: Message) -> None:
     if not await is_admin(user_id):
         await message.answer("Команда недоступна.")
         return
-    await message.answer(await admins_text(), reply_markup=keyboard())
+    await message.answer(await admins_text(), reply_markup=await _safe_keyboard())
 
 
 @router.callback_query(F.data.startswith("hotadmin:"))
@@ -250,7 +263,7 @@ async def admin_callback(callback: CallbackQuery) -> None:
                 "Бесплатным: <code>/broadcast free Текст</code>"
             )
         if callback.message:
-            await callback.message.answer(text, reply_markup=keyboard())
+            await callback.message.answer(text, reply_markup=await _safe_keyboard())
         await callback.answer()
     except Exception:
         logger.exception("admin_callback_failed", action=action, user_id=callback.from_user.id)
