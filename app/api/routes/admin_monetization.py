@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.routes.admin import AdminAuth, Session
+from app.db.access_models import AppMonetizationSettings
 from app.db.models import User
 from app.services.access import access_state, get_monetization_settings, grant_access, payment_plans
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin/monetization", tags=["admin-monetization"])
 
 
@@ -53,8 +57,7 @@ class GrantAccessRequest(BaseModel):
     days: int = Field(ge=1, le=3650)
 
 
-
-def serialize_config(row) -> dict:
+def serialize_config(row: AppMonetizationSettings) -> dict:
     return {
         "free_trial_enabled": row.free_trial_enabled,
         "show_trial_in_profile": row.show_trial_in_profile,
@@ -80,18 +83,32 @@ async def patch_settings(body: MonetizationPatch, admin: AdminAuth, session: Ses
     values = body.model_dump(exclude_none=True)
     if not values:
         raise HTTPException(status_code=422, detail="Не переданы настройки для сохранения")
-    row = await get_monetization_settings(session, lock=True)
-    for key, value in values.items():
-        setattr(row, key, value)
-    row.updated_by = admin
+
+    # Ensure the singleton exists before issuing a Core UPDATE.
+    await get_monetization_settings(session)
+    values["updated_by"] = admin
+    values["updated_at"] = func.now()
+
     try:
-        await session.flush()
-        result = serialize_config(row)
+        await session.execute(
+            update(AppMonetizationSettings)
+            .where(AppMonetizationSettings.id == 1)
+            .values(**values)
+        )
         await session.commit()
-    except SQLAlchemyError as exc:
+        row = await session.scalar(
+            select(AppMonetizationSettings).where(AppMonetizationSettings.id == 1)
+        )
+        if row is None:
+            raise RuntimeError("Monetization settings disappeared after update")
+        return {"ok": True, "settings": serialize_config(row)}
+    except (SQLAlchemyError, RuntimeError, ValueError, TypeError) as exc:
         await session.rollback()
-        raise HTTPException(status_code=409, detail="Не удалось сохранить настройки тарифов. Проверьте введённые значения.") from exc
-    return {"ok": True, "settings": result}
+        logger.exception("Failed to persist monetization settings")
+        raise HTTPException(
+            status_code=409,
+            detail="Не удалось сохранить настройки тарифов. Проверьте значения и повторите попытку.",
+        ) from exc
 
 
 @router.post("/grant-access")
