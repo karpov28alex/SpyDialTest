@@ -30,6 +30,7 @@ async def me(user: CurrentUser, session: SessionDep) -> dict:
         "username": user.username,
         "first_name": user.first_name,
         "last_name": user.last_name,
+        "registered_at": user.registered_at,
         "subscription_status": refresh_subscription_status(user).value,
         "access_ends_at": access_ends_at(user),
         "business_connected": bool(connection),
@@ -248,6 +249,8 @@ async def versions(message_id: int, user: CurrentUser, session: SessionDep) -> d
 
 
 SETTINGS_FIELDS = (
+    "notifications_enabled",
+    "save_protected_media",
     "notify_edits",
     "notify_deletions",
     "notify_protected_media",
@@ -266,6 +269,8 @@ async def get_settings_route(user: CurrentUser) -> dict:
 
 
 class SettingsPatch(BaseModel):
+    notifications_enabled: bool | None = None
+    save_protected_media: bool | None = None
     notify_edits: bool | None = None
     notify_deletions: bool | None = None
     notify_protected_media: bool | None = None
@@ -273,13 +278,14 @@ class SettingsPatch(BaseModel):
     hide_preview: bool | None = None
     notify_emoji: bool | None = None
     theme: str | None = Field(default=None, pattern="^(dark|light|system)$")
-    language: str | None = None
-    timezone: str | None = None
+    language: str | None = Field(default=None, max_length=16)
+    timezone: str | None = Field(default=None, max_length=64)
 
 
 @router.patch("/settings")
 async def patch_settings(body: SettingsPatch, user: CurrentUser, session: SessionDep) -> dict:
-    for key, value in body.model_dump(exclude_none=True).items():
+    values = body.model_dump(exclude_none=True)
+    for key, value in values.items():
         setattr(user.settings, key, value)
     await session.commit()
     return {"ok": True, "settings": {key: getattr(user.settings, key) for key in SETTINGS_FIELDS}}
