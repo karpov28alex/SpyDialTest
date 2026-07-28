@@ -11,6 +11,7 @@ from app.api.routes.admin import router as admin_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.user import router as user_router
 from app.api.routes.webhook import router as webhook_router
+from app.api.routes.webhook_compat import router as webhook_compat_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import engine
@@ -38,6 +39,7 @@ app.include_router(auth_router)
 app.include_router(user_router)
 app.include_router(admin_router)
 app.include_router(webhook_router)
+app.include_router(webhook_compat_router)
 
 
 @app.middleware("http")
