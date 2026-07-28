@@ -19,40 +19,52 @@ def dialog():
     return SimpleNamespace(peer_name="Иван <Иванов>", peer_username=None, telegram_chat_id=42)
 
 
-def test_edit_notification_contains_escaped_old_and_new_content() -> None:
-    text = format_edit_notification(
-        dialog=dialog(),
-        settings=prefs(),
-        old_content="старое <b>",
-        new_content="новое & важное",
+def message():
+    return SimpleNamespace(
+        text="новое & важное",
+        caption=None,
         edited_at=datetime(2026, 7, 28, 12, 30, tzinfo=UTC),
     )
-    assert "Было:" in text
-    assert "Стало:" in text
+
+
+def versions():
+    return [
+        SimpleNamespace(
+            version_number=1,
+            text="старое <b>",
+            caption=None,
+            created_at=datetime(2026, 7, 28, 12, 20, tzinfo=UTC),
+        )
+    ]
+
+
+def test_edit_notification_contains_escaped_history_and_current_content() -> None:
+    text = format_edit_notification(
+        dialog=dialog(), settings=prefs(), message=message(), versions=versions()
+    )
+    assert "Версия 1" in text
+    assert "Текущая версия" in text
     assert "старое &lt;b&gt;" in text
     assert "новое &amp; важное" in text
+    assert "Все версии сохранены" in text
 
 
 def test_hidden_preview_never_leaks_message_text() -> None:
     text = format_edit_notification(
-        dialog=dialog(),
-        settings=prefs(hide_preview=True),
-        old_content="секрет-до",
-        new_content="секрет-после",
-        edited_at=None,
+        dialog=dialog(), settings=prefs(hide_preview=True), message=message(), versions=versions()
     )
-    assert "секрет-до" not in text
-    assert "секрет-после" not in text
+    assert "старое" not in text
+    assert "новое" not in text
 
 
 def test_delete_notification_keeps_saved_content() -> None:
-    message = SimpleNamespace(
+    deleted = SimpleNamespace(
         text="удалённый текст",
         caption=None,
         sent_at=datetime(2026, 7, 28, 12, 0, tzinfo=UTC),
         deleted_at=datetime(2026, 7, 28, 12, 5, tzinfo=UTC),
     )
-    text = format_delete_notification(dialog=dialog(), settings=prefs(), message=message)
+    text = format_delete_notification(dialog=dialog(), settings=prefs(), message=deleted)
     assert "удалённый текст" in text
     assert "Отправлено:" in text
     assert "Удалено:" in text
@@ -70,6 +82,7 @@ class FakeTelegramMessage:
 def test_protected_media_requires_explicit_telegram_signal() -> None:
     assert is_protected_message(FakeTelegramMessage(True)).allowed is True
     assert is_protected_message(FakeTelegramMessage(False, {"ttl_seconds": 10})).allowed is True
+    assert is_protected_message(FakeTelegramMessage(False, {"is_view_once": True})).allowed is True
     assert is_protected_message(FakeTelegramMessage(False)).allowed is False
 
 
