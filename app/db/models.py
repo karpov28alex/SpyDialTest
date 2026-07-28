@@ -165,6 +165,23 @@ class FailedUpdate(Base, TimestampMixin):
     correlation_id: Mapped[str] = mapped_column(String(64), index=True)
 
 
+class Job(Base, TimestampMixin):
+    __tablename__ = "jobs"
+    __table_args__ = (
+        Index("ix_jobs_status_available", "status", "available_at"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(64), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=5)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+
+
 class Referral(Base):
     __tablename__ = "referrals"
     id: Mapped[int] = mapped_column(primary_key=True)
