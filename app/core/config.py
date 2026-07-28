@@ -1,4 +1,5 @@
 from functools import lru_cache
+import json
 from pathlib import Path
 
 from pydantic import Field, field_validator
@@ -9,7 +10,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=None, case_sensitive=False, extra="ignore")
 
     app_env: str = "development"
-    app_version: str = "0.3.0"
+    app_version: str = "0.3.1"
     git_sha: str = "local"
     secret_key: str = Field(min_length=32)
     database_url: str
@@ -28,12 +29,43 @@ class Settings(BaseSettings):
     refresh_token_ttl_days: int = 30
     cors_origins: tuple[str, ...] = ()
 
-    @field_validator("telegram_admin_ids", "cors_origins", mode="before")
+    @field_validator("telegram_admin_ids", mode="before")
     @classmethod
-    def split_csv(cls, value: object) -> object:
+    def parse_admin_ids(cls, value: object) -> object:
+        if value is None or value == "":
+            return ()
+        if isinstance(value, (list, tuple, set)):
+            return tuple(int(item) for item in value)
+        if isinstance(value, int):
+            return (value,)
         if isinstance(value, str):
-            values = [item.strip() for item in value.split(",") if item.strip()]
-            return tuple(int(item) for item in values) if values and values[0].isdigit() else tuple(values)
+            raw = value.strip()
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError:
+                decoded = None
+            if isinstance(decoded, list):
+                return tuple(int(item) for item in decoded)
+            raw = raw.strip("[](){}")
+            return tuple(int(item.strip()) for item in raw.split(",") if item.strip())
+        return value
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value: object) -> object:
+        if value is None or value == "":
+            return ()
+        if isinstance(value, (list, tuple, set)):
+            return tuple(str(item) for item in value)
+        if isinstance(value, str):
+            raw = value.strip()
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError:
+                decoded = None
+            if isinstance(decoded, list):
+                return tuple(str(item) for item in decoded)
+            return tuple(item.strip() for item in raw.split(",") if item.strip())
         return value
 
 
