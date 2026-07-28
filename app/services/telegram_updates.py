@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.business.events import is_protected_message
 from app.db.models import BusinessConnection, Dialog, Media, Message, MessageVersion, ProcessedUpdate, User
 
 
@@ -43,12 +44,16 @@ async def finish_update(session: AsyncSession, update_id: int) -> None:
         row.processed_at = datetime.now(UTC)
 
 
-async def upsert_business_connection(session: AsyncSession, event: TgBusinessConnection) -> BusinessConnection | None:
+async def upsert_business_connection(
+    session: AsyncSession, event: TgBusinessConnection
+) -> BusinessConnection | None:
     owner = await session.scalar(select(User).where(User.telegram_id == event.user.id))
     if owner is None:
         return None
     row = await session.scalar(
-        select(BusinessConnection).where(BusinessConnection.telegram_connection_id == event.id).with_for_update()
+        select(BusinessConnection)
+        .where(BusinessConnection.telegram_connection_id == event.id)
+        .with_for_update()
     )
     now = datetime.now(UTC)
     rights = event.rights.model_dump(mode="json") if event.rights else {}
@@ -65,6 +70,8 @@ async def upsert_business_connection(session: AsyncSession, event: TgBusinessCon
         )
         session.add(row)
     else:
+        row.owner_user_id = owner.id
+        row.business_user_id = event.user.id
         row.is_active = event.is_enabled
         row.rights = rights
         row.last_activity_at = now
@@ -72,9 +79,14 @@ async def upsert_business_connection(session: AsyncSession, event: TgBusinessCon
     return row
 
 
-async def _connection_for_message(session: AsyncSession, connection_id: str) -> BusinessConnection | None:
+async def _connection_for_message(
+    session: AsyncSession, connection_id: str
+) -> BusinessConnection | None:
     return await session.scalar(
-        select(BusinessConnection).where(BusinessConnection.telegram_connection_id == connection_id)
+        select(BusinessConnection).where(
+            BusinessConnection.telegram_connection_id == connection_id,
+            BusinessConnection.is_active.is_(True),
+        )
     )
 
 
@@ -109,6 +121,7 @@ async def _dialog_for_message(
 
 
 def _media_from_message(event: TgMessage) -> list[dict[str, Any]]:
+    decision = is_protected_message(event)
     result: list[dict[str, Any]] = []
     candidates = [
         ("photo", event.photo[-1] if event.photo else None),
@@ -134,15 +147,17 @@ def _media_from_message(event: TgMessage) -> list[dict[str, Any]]:
                 "duration": getattr(item, "duration", None),
                 "width": getattr(item, "width", None),
                 "height": getattr(item, "height", None),
-                "is_protected": bool(event.has_protected_content),
+                "is_protected": decision.allowed,
             }
         )
     return result
 
 
-async def save_business_message(session: AsyncSession, event: TgMessage) -> tuple[Message | None, bool]:
+async def save_business_message(
+    session: AsyncSession, event: TgMessage
+) -> tuple[Message | None, bool]:
     if not event.business_connection_id:
-        return None, False, None
+        return None, False
     connection = await _connection_for_message(session, event.business_connection_id)
     if connection is None:
         return None, False
@@ -156,7 +171,12 @@ async def save_business_message(session: AsyncSession, event: TgMessage) -> tupl
     )
     if existing:
         return existing, False
-    direction = "outgoing" if event.from_user and event.from_user.id == connection.business_user_id else "incoming"
+
+    direction = (
+        "outgoing"
+        if event.from_user and event.from_user.id == connection.business_user_id
+        else "incoming"
+    )
     message = Message(
         dialog_id=dialog.id,
         business_connection_id=connection.id,
@@ -172,48 +192,80 @@ async def save_business_message(session: AsyncSession, event: TgMessage) -> tupl
     )
     session.add(message)
     await session.flush()
+
+    # Version 1 is the immutable original snapshot. Later edits append old snapshots.
+    session.add(
+        MessageVersion(
+            message_id=message.id,
+            version_number=1,
+            text=message.text,
+            caption=message.caption,
+            created_at=message.sent_at,
+        )
+    )
     for data in _media_from_message(event):
         session.add(Media(message_id=message.id, **data))
     connection.last_activity_at = datetime.now(UTC)
     return message, True
 
 
-async def edit_business_message(session: AsyncSession, event: TgMessage) -> tuple[Message | None, bool, str | None]:
+async def edit_business_message(
+    session: AsyncSession, event: TgMessage
+) -> tuple[Message | None, bool, str | None]:
     if not event.business_connection_id:
         return None, False, None
     connection = await _connection_for_message(session, event.business_connection_id)
     if connection is None:
         return None, False, None
     message = await session.scalar(
-        select(Message).where(
+        select(Message)
+        .where(
             Message.business_connection_id == connection.id,
             Message.telegram_chat_id == event.chat.id,
             Message.telegram_message_id == event.message_id,
-        ).with_for_update()
+        )
+        .with_for_update()
     )
     if message is None:
+        # Telegram can deliver an edit after a cold start without the original update.
+        # Archive the current value, but never invent a missing previous value.
         message, _ = await save_business_message(session, event)
         return message, False, None
     if message.text == event.text and message.caption == event.caption:
         return message, False, None
+
     old_content = message.text or message.caption
-    version = int(
-        await session.scalar(select(func.coalesce(func.max(MessageVersion.version_number), 0)).where(MessageVersion.message_id == message.id))
-        or 0
-    ) + 1
-    session.add(
-        MessageVersion(
-            message_id=message.id,
-            version_number=version,
-            text=message.text,
-            caption=message.caption,
-            created_at=datetime.now(UTC),
+    current_version = int(
+        await session.scalar(
+            select(func.coalesce(func.max(MessageVersion.version_number), 0)).where(
+                MessageVersion.message_id == message.id
+            )
         )
+        or 0
     )
+    # Avoid duplicating the original snapshot already stored as version 1.
+    latest = await session.scalar(
+        select(MessageVersion)
+        .where(MessageVersion.message_id == message.id)
+        .order_by(MessageVersion.version_number.desc())
+        .limit(1)
+    )
+    if latest is None or latest.text != message.text or latest.caption != message.caption:
+        session.add(
+            MessageVersion(
+                message_id=message.id,
+                version_number=current_version + 1,
+                text=message.text,
+                caption=message.caption,
+                created_at=message.edited_at or datetime.now(UTC),
+            )
+        )
+
     message.text = event.text
     message.caption = event.caption
     message.edited_at = event.edit_date or datetime.now(UTC)
     message.raw_metadata = event.model_dump(mode="json", exclude_none=True)
+    connection.last_activity_at = datetime.now(UTC)
     return message, True, old_content
 
 
@@ -227,18 +279,19 @@ async def delete_business_messages(
     results: list[Message | None] = []
     for telegram_message_id in event.message_ids:
         message = await session.scalar(
-            select(Message).where(
+            select(Message)
+            .where(
                 Message.business_connection_id == connection.id,
                 Message.telegram_chat_id == event.chat.id,
                 Message.telegram_message_id == telegram_message_id,
-            ).with_for_update()
+            )
+            .with_for_update()
         )
-        if message and not message.is_deleted:
-            message.is_deleted = True
-            message.deleted_at = now
-            results.append(message)
-        elif message:
+        if message is None or message.is_deleted:
             results.append(None)
-        else:
-            results.append(None)
+            continue
+        message.is_deleted = True
+        message.deleted_at = now
+        results.append(message)
+    connection.last_activity_at = now
     return results
