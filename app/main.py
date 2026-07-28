@@ -8,6 +8,7 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 
 from app.api.routes.admin import router as admin_router
+from app.api.routes.admin_explorer import router as admin_explorer_router
 from app.api.routes.admin_monetization import router as admin_monetization_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.avatar import router as avatar_router
@@ -41,6 +42,7 @@ app.include_router(auth_router)
 app.include_router(user_router)
 app.include_router(avatar_router)
 app.include_router(admin_router)
+app.include_router(admin_explorer_router)
 app.include_router(admin_monetization_router)
 app.include_router(webhook_router)
 app.include_router(webhook_compat_router)
