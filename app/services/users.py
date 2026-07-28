@@ -4,10 +4,8 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Referral, User, UserSettings
-
-TRIAL_DURATION = timedelta(hours=72)
-REFERRAL_DURATION = timedelta(hours=72)
+from app.db.models import Referral, SubscriptionStatus, User, UserSettings
+from app.services.access import get_monetization_settings
 
 
 async def register_or_update_user(
@@ -21,9 +19,11 @@ async def register_or_update_user(
     start_parameter: str | None = None,
 ) -> tuple[User, bool]:
     now = datetime.now(UTC)
+    config = await get_monetization_settings(session)
     user = await session.scalar(select(User).where(User.telegram_id == telegram_id).with_for_update())
     created = user is None
     if user is None:
+        trial_end = now + timedelta(days=config.trial_days) if config.free_trial_enabled else now
         user = User(
             telegram_id=telegram_id,
             username=username,
@@ -32,10 +32,9 @@ async def register_or_update_user(
             language_code=language_code,
             registered_at=now,
             last_seen_at=now,
-            # Registration alone does not consume the free period. The 72-hour
-            # window is activated by the first enabled BusinessConnection event.
             trial_started_at=now,
-            trial_ends_at=now,
+            trial_ends_at=trial_end,
+            subscription_status=SubscriptionStatus.trial if config.free_trial_enabled else SubscriptionStatus.expired,
         )
         user.settings = UserSettings(language=language_code or "ru")
         session.add(user)
@@ -52,13 +51,7 @@ async def register_or_update_user(
 
 
 def activate_business_trial(user: User, now: datetime | None = None) -> bool:
-    """Activate the one-time 72-hour trial on first Business connection."""
-    now = now or datetime.now(UTC)
-    # A zero-length window marks a trial that has never been activated.
-    if user.trial_ends_at <= user.trial_started_at:
-        user.trial_started_at = now
-        user.trial_ends_at = now + TRIAL_DURATION
-        return True
+    """Backward compatible hook. Trial is now assigned at registration when enabled."""
     return False
 
 
@@ -80,19 +73,14 @@ async def apply_referral(session: AsyncSession, *, referred: User, code: str) ->
     existing = await session.scalar(select(Referral).where(Referral.referred_user_id == referred.id))
     if existing:
         return False
+    config = await get_monetization_settings(session)
     now = datetime.now(UTC)
     referred.referrer_user_id = referrer.id
-    session.add(
-        Referral(
-            referrer_user_id=referrer.id,
-            referred_user_id=referred.id,
-            code=code,
-            joined_at=now,
-        )
-    )
+    session.add(Referral(referrer_user_id=referrer.id, referred_user_id=referred.id, code=code, joined_at=now))
     if referrer.referral_bonus_granted_at is None:
-        referrer.trial_ends_at = max(now, referrer.trial_ends_at) + REFERRAL_DURATION
+        referrer.trial_ends_at = max(now, referrer.trial_ends_at) + timedelta(days=config.referral_bonus_days)
         referrer.referral_bonus_granted_at = now
+        referrer.subscription_status = SubscriptionStatus.referral
     return True
 
 
