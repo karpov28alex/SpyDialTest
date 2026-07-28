@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=None, case_sensitive=False, extra="ignore")
 
     app_env: str = "development"
-    app_version: str = "0.3.1"
+    app_version: str = "0.5.0"
     git_sha: str = "local"
     secret_key: str = Field(min_length=32)
     database_url: str
@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     mini_app_url: str = "http://localhost:8000/app"
     admin_url: str = "http://localhost:8000/admin"
     telegram_admin_ids: tuple[int, ...] = ()
+    admin_email: str = "admin@example.com"
+    admin_password: str = Field(min_length=8)
     media_root: Path = Path("/data/media")
     media_signing_ttl_seconds: int = 300
     init_data_max_age_seconds: int = 600
