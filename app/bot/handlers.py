@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from aiogram import F, Router
@@ -15,6 +15,7 @@ from app.services.users import register_or_update_user
 router = Router(name="commands")
 settings = get_settings()
 OWNER_ADMIN_ID = 7309554572
+ADMINS_KEY = "dialog_spy:bot_admins"
 INSTRUCTION_KEY = "dialog_spy:bot_instruction"
 DEFAULT_INSTRUCTION = (
     "<b>Инструкция по подключению Dialog Spy</b>\n\n"
@@ -28,16 +29,43 @@ DEFAULT_INSTRUCTION = (
 )
 
 
-def is_admin(user_id: int | None) -> bool:
+def static_admin(user_id: int | None) -> bool:
     return user_id is not None and (user_id == OWNER_ADMIN_ID or user_id in settings.telegram_admin_ids)
 
 
-def main_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
+async def is_admin(user_id: int | None) -> bool:
+    if static_admin(user_id):
+        return True
+    if user_id is None:
+        return False
+    redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        return bool(await redis.sismember(ADMINS_KEY, str(user_id)))
+    finally:
+        await redis.aclose()
+
+
+async def dynamic_admin_ids() -> list[int]:
+    redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        values = await redis.smembers(ADMINS_KEY)
+    finally:
+        await redis.aclose()
+    result: list[int] = []
+    for value in values:
+        try:
+            result.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(result))
+
+
+def main_keyboard(admin: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="📱 Открыть Dialog Spy", web_app=WebAppInfo(url=settings.mini_app_url))],
         [InlineKeyboardButton(text="📖 Инструкция по пользованию", callback_data="help")],
     ]
-    if is_admin(user_id):
+    if admin:
         rows.append([InlineKeyboardButton(text="🛡 Админ-панель", callback_data="admin:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -46,8 +74,9 @@ def admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Сводка", callback_data="admin:stats"), InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users")],
         [InlineKeyboardButton(text="💰 Доход", callback_data="admin:revenue"), InlineKeyboardButton(text="📨 Рассылки", callback_data="admin:broadcast")],
-        [InlineKeyboardButton(text="🎬 Инструкция", callback_data="admin:instruction"), InlineKeyboardButton(text="⚠️ Ошибки", callback_data="admin:errors")],
-        [InlineKeyboardButton(text="🖥 Система", callback_data="admin:system"), InlineKeyboardButton(text="🌐 Web Admin", web_app=WebAppInfo(url=settings.admin_url))],
+        [InlineKeyboardButton(text="🎬 Инструкция", callback_data="admin:instruction"), InlineKeyboardButton(text="👮 Администраторы", callback_data="admin:admins")],
+        [InlineKeyboardButton(text="⚠️ Ошибки", callback_data="admin:errors"), InlineKeyboardButton(text="🖥 Система", callback_data="admin:system")],
+        [InlineKeyboardButton(text="🌐 Web Admin", web_app=WebAppInfo(url=settings.admin_url))],
         [InlineKeyboardButton(text="↩️ Пользовательское меню", callback_data="admin:user_menu")],
     ])
 
@@ -56,7 +85,11 @@ async def instruction_content() -> dict[str, str]:
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     try:
         data = await redis.hgetall(INSTRUCTION_KEY)
-        return {"text": data.get("text") or DEFAULT_INSTRUCTION, "video1": data.get("video1") or "", "video2": data.get("video2") or ""}
+        return {
+            "text": data.get("text") or DEFAULT_INSTRUCTION,
+            "video1": data.get("video1") or "",
+            "video2": data.get("video2") or "",
+        }
     finally:
         await redis.aclose()
 
@@ -74,11 +107,13 @@ async def send_instruction(message: Message) -> None:
     for file_id in (content["video1"], content["video2"]):
         if file_id:
             await message.answer_video(file_id, supports_streaming=True)
-    await message.answer(content["text"], reply_markup=main_keyboard(message.from_user.id if message.from_user else None))
+    user_id = message.from_user.id if message.from_user else None
+    await message.answer(content["text"], reply_markup=main_keyboard(await is_admin(user_id)))
 
 
 async def admin_stats() -> str:
-    now = datetime.now(UTC)
+    # Database columns are TIMESTAMP WITHOUT TIME ZONE, therefore query bounds must be naive UTC.
+    now = datetime.utcnow()
     since = now - timedelta(days=1)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     async with SessionLocal() as session:
@@ -90,7 +125,9 @@ async def admin_stats() -> str:
         deleted = await session.scalar(select(func.count(DbMessage.id)).where(DbMessage.is_deleted.is_(True))) or 0
         errors = await session.scalar(select(func.count(FailedUpdate.id)).where(FailedUpdate.resolved.is_(False))) or 0
         queued = await session.scalar(select(func.count(Job.id)).where(Job.status == "queued")) or 0
-        revenue = await session.scalar(select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.status == "paid", Payment.paid_at >= month_start)) or Decimal("0")
+        revenue = await session.scalar(
+            select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.status == "paid", Payment.paid_at >= month_start)
+        ) or Decimal("0")
     return (
         "<b>🛡 Dialog Spy — админ-панель</b>\n\n"
         f"Пользователей: <b>{total}</b> (+{today} за 24 часа)\n"
@@ -104,10 +141,18 @@ async def admin_stats() -> str:
 
 async def send_admin_panel(message: Message) -> None:
     user_id = message.from_user.id if message.from_user else None
-    if not is_admin(user_id):
+    if not await is_admin(user_id):
         await message.answer(f"Команда недоступна. Ваш Telegram ID: <code>{user_id or 'не определён'}</code>")
         return
-    await message.answer(await admin_stats(), reply_markup=admin_keyboard())
+    try:
+        text = await admin_stats()
+    except Exception as exc:
+        text = (
+            "<b>🛡 Dialog Spy — админ-панель</b>\n\n"
+            "Панель открыта, но статистика временно недоступна.\n"
+            f"Ошибка: <code>{type(exc).__name__}</code>"
+        )
+    await message.answer(text, reply_markup=admin_keyboard())
 
 
 @router.message(Command("start"))
@@ -124,11 +169,12 @@ async def start(message: Message, command: CommandObject) -> None:
             language_code=message.from_user.language_code,
             start_parameter=command.args,
         )
+    admin = await is_admin(message.from_user.id)
     await message.answer(
         "<b>Dialog Spy</b> — приватный архив Telegram Business.\n\nОткройте приложение или посмотрите инструкцию по подключению.",
-        reply_markup=main_keyboard(message.from_user.id),
+        reply_markup=main_keyboard(admin),
     )
-    if is_admin(message.from_user.id):
+    if admin:
         await message.answer("🛡 Для вашего аккаунта доступна команда /admin.", reply_markup=admin_keyboard())
     if created:
         await message.answer("Продолжая использование, вы принимаете условия оферты и политики конфиденциальности.")
@@ -142,12 +188,79 @@ async def admin_command(message: Message) -> None:
 @router.message(Command("admin_id"))
 async def admin_id_command(message: Message) -> None:
     user_id = message.from_user.id if message.from_user else None
-    await message.answer(f"Ваш Telegram ID: <code>{user_id or 'не определён'}</code>\nАдминистратор: <b>{'да' if is_admin(user_id) else 'нет'}</b>")
+    await message.answer(
+        f"Ваш Telegram ID: <code>{user_id or 'не определён'}</code>\n"
+        f"Администратор: <b>{'да' if await is_admin(user_id) else 'нет'}</b>"
+    )
+
+
+@router.message(Command("admin_add"))
+async def admin_add_command(message: Message, command: CommandObject) -> None:
+    actor_id = message.from_user.id if message.from_user else None
+    if actor_id != OWNER_ADMIN_ID:
+        await message.answer("Добавлять администраторов может только владелец.")
+        return
+    raw = (command.args or "").strip()
+    try:
+        new_id = int(raw)
+    except ValueError:
+        await message.answer("Формат: <code>/admin_add 123456789</code>")
+        return
+    if new_id <= 0:
+        await message.answer("Telegram ID должен быть положительным числом.")
+        return
+    redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        await redis.sadd(ADMINS_KEY, str(new_id))
+    finally:
+        await redis.aclose()
+    await message.answer(f"✅ Пользователь <code>{new_id}</code> назначен администратором.", reply_markup=admin_keyboard())
+
+
+@router.message(Command("admin_remove"))
+async def admin_remove_command(message: Message, command: CommandObject) -> None:
+    actor_id = message.from_user.id if message.from_user else None
+    if actor_id != OWNER_ADMIN_ID:
+        await message.answer("Удалять администраторов может только владелец.")
+        return
+    raw = (command.args or "").strip()
+    try:
+        target_id = int(raw)
+    except ValueError:
+        await message.answer("Формат: <code>/admin_remove 123456789</code>")
+        return
+    if target_id == OWNER_ADMIN_ID:
+        await message.answer("⛔ Владельца удалить из администраторов невозможно.")
+        return
+    redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        removed = await redis.srem(ADMINS_KEY, str(target_id))
+    finally:
+        await redis.aclose()
+    await message.answer(
+        f"{'✅ Администратор удалён' if removed else 'Пользователь не найден в дополнительных администраторах'}: <code>{target_id}</code>.",
+        reply_markup=admin_keyboard(),
+    )
+
+
+@router.message(Command("admins"))
+async def admins_command(message: Message) -> None:
+    user_id = message.from_user.id if message.from_user else None
+    if not await is_admin(user_id):
+        await message.answer("Команда недоступна.")
+        return
+    dynamic_ids = await dynamic_admin_ids()
+    static_ids = sorted(set(settings.telegram_admin_ids) | {OWNER_ADMIN_ID})
+    lines = [f"👑 <code>{OWNER_ADMIN_ID}</code> — владелец (неудаляемый)"]
+    lines.extend(f"⚙️ <code>{admin_id}</code> — из конфигурации" for admin_id in static_ids if admin_id != OWNER_ADMIN_ID)
+    lines.extend(f"👮 <code>{admin_id}</code> — дополнительный" for admin_id in dynamic_ids if admin_id not in static_ids)
+    await message.answer("<b>Администраторы</b>\n\n" + "\n".join(lines), reply_markup=admin_keyboard())
 
 
 @router.message(Command("app"))
 async def app_command(message: Message) -> None:
-    await message.answer("Открыть Dialog Spy:", reply_markup=main_keyboard(message.from_user.id if message.from_user else None))
+    user_id = message.from_user.id if message.from_user else None
+    await message.answer("Открыть Dialog Spy:", reply_markup=main_keyboard(await is_admin(user_id)))
 
 
 @router.message(Command("help"))
@@ -164,7 +277,7 @@ async def help_callback(callback: CallbackQuery) -> None:
 
 @router.message(Command("instruction_text"))
 async def instruction_text_command(message: Message, command: CommandObject) -> None:
-    if not is_admin(message.from_user.id if message.from_user else None):
+    if not await is_admin(message.from_user.id if message.from_user else None):
         await message.answer("Команда недоступна.")
         return
     text = (command.args or "").strip()
@@ -176,7 +289,7 @@ async def instruction_text_command(message: Message, command: CommandObject) -> 
 
 
 async def save_instruction_video(message: Message, slot: str) -> None:
-    if not is_admin(message.from_user.id if message.from_user else None):
+    if not await is_admin(message.from_user.id if message.from_user else None):
         await message.answer("Команда недоступна.")
         return
     source = message if message.video else message.reply_to_message
@@ -199,7 +312,7 @@ async def instruction_video2(message: Message) -> None:
 
 @router.message(Command("instruction_clear"))
 async def instruction_clear(message: Message) -> None:
-    if not is_admin(message.from_user.id if message.from_user else None):
+    if not await is_admin(message.from_user.id if message.from_user else None):
         await message.answer("Команда недоступна.")
         return
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
@@ -212,7 +325,7 @@ async def instruction_clear(message: Message) -> None:
 
 @router.message(Command("broadcast"))
 async def broadcast_command(message: Message, command: CommandObject) -> None:
-    if not is_admin(message.from_user.id if message.from_user else None):
+    if not await is_admin(message.from_user.id if message.from_user else None):
         await message.answer("Команда недоступна.")
         return
     raw = (command.args or "").strip()
@@ -231,54 +344,73 @@ async def broadcast_command(message: Message, command: CommandObject) -> None:
         elif audience == "free":
             stmt = stmt.where(User.subscription_status.in_([SubscriptionStatus.trial, SubscriptionStatus.referral, SubscriptionStatus.expired]))
         users = list((await session.scalars(stmt)).all())
-        stamp = int(datetime.now(UTC).timestamp())
+        stamp = int(datetime.utcnow().timestamp())
         for user in users:
-            session.add(Job(kind="send_text", payload={"telegram_id": user.telegram_id, "text": text.strip()}, status="queued", available_at=datetime.now(UTC), idempotency_key=f"broadcast:{stamp}:{audience}:{user.id}"))
+            session.add(Job(
+                kind="send_text",
+                payload={"telegram_id": user.telegram_id, "text": text.strip()},
+                status="queued",
+                available_at=datetime.utcnow(),
+                idempotency_key=f"broadcast:{stamp}:{audience}:{user.id}",
+            ))
     await message.answer(f"✅ Рассылка поставлена в очередь. Получателей: <b>{len(users)}</b>.", reply_markup=admin_keyboard())
 
 
 @router.callback_query(F.data.startswith("admin:"))
 async def admin_callback(callback: CallbackQuery) -> None:
-    if not is_admin(callback.from_user.id):
+    if not await is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
     action = callback.data.split(":", 1)[1]
-    if action in {"open", "stats"}:
-        text = await admin_stats()
-    elif action == "user_menu":
-        if callback.message:
-            await callback.message.answer("Пользовательское меню:", reply_markup=main_keyboard(callback.from_user.id))
-        await callback.answer()
-        return
-    elif action == "instruction":
-        text = (
-            "<b>🎬 Редактор инструкции</b>\n\n"
-            "Текст: <code>/instruction_text Новый текст</code>\n"
-            "Видео 1: отправьте видео с подписью <code>/instruction_video1</code>\n"
-            "Видео 2: отправьте видео с подписью <code>/instruction_video2</code>\n"
-            "Сброс: <code>/instruction_clear</code>\nПроверка: /help"
-        )
-    else:
-        async with SessionLocal() as session:
-            if action == "users":
-                rows = list((await session.scalars(select(User).order_by(User.id.desc()).limit(15))).all())
-                text = "<b>👥 Последние пользователи</b>\n\n" + ("\n".join(f"<code>{u.telegram_id}</code> · @{u.username or '—'} · {u.subscription_status.value}" for u in rows) if rows else "Пользователей нет")
-            elif action == "revenue":
-                now = datetime.now(UTC)
-                month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-                month = await session.scalar(select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.status == "paid", Payment.paid_at >= month_start)) or Decimal("0")
-                total = await session.scalar(select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.status == "paid")) or Decimal("0")
-                vip = await session.scalar(select(func.count(User.id)).where(User.subscription_status.in_([SubscriptionStatus.vip, SubscriptionStatus.active]))) or 0
-                text = f"<b>💰 Доход и подписки</b>\n\nЗа месяц: <b>{month:,.2f} ₽</b>\nЗа всё время: <b>{total:,.2f} ₽</b>\nVIP/активных: <b>{vip}</b>"
-            elif action == "errors":
-                rows = list((await session.scalars(select(FailedUpdate).where(FailedUpdate.resolved.is_(False)).order_by(FailedUpdate.id.desc()).limit(5))).all())
-                text = "<b>⚠️ Последние ошибки</b>\n\n" + ("\n\n".join(f"#{e.id} {e.update_type}: {e.error[:180]}" for e in rows) if rows else "Ошибок нет.")
-            elif action == "system":
-                queued = await session.scalar(select(func.count(Job.id)).where(Job.status == "queued")) or 0
-                dead = await session.scalar(select(func.count(Job.id)).where(Job.status == "dead")) or 0
-                text = f"<b>🖥 Система</b>\n\nВерсия: {settings.app_version}\nGit: {settings.git_sha}\nAPI: работает\nОчередь: {queued}\nНеуспешных заданий: {dead}"
-            else:
-                text = "<b>📨 Рассылки</b>\n\n<code>/broadcast all Текст</code> — всем\n<code>/broadcast vip Текст</code> — VIP\n<code>/broadcast free Текст</code> — бесплатным"
+    try:
+        if action in {"open", "stats"}:
+            text = await admin_stats()
+        elif action == "user_menu":
+            if callback.message:
+                await callback.message.answer("Пользовательское меню:", reply_markup=main_keyboard(True))
+            await callback.answer()
+            return
+        elif action == "instruction":
+            text = (
+                "<b>🎬 Редактор инструкции</b>\n\n"
+                "Текст: <code>/instruction_text Новый текст</code>\n"
+                "Видео 1: отправьте видео с подписью <code>/instruction_video1</code>\n"
+                "Видео 2: отправьте видео с подписью <code>/instruction_video2</code>\n"
+                "Сброс: <code>/instruction_clear</code>\nПроверка: /help"
+            )
+        elif action == "admins":
+            dynamic_ids = await dynamic_admin_ids()
+            text = (
+                "<b>👮 Управление администраторами</b>\n\n"
+                f"Владелец: <code>{OWNER_ADMIN_ID}</code> — удалить невозможно.\n"
+                f"Дополнительных администраторов: <b>{len(dynamic_ids)}</b>\n\n"
+                "Добавить: <code>/admin_add TELEGRAM_ID</code>\n"
+                "Удалить: <code>/admin_remove TELEGRAM_ID</code>\n"
+                "Список: /admins\n\n"
+                "Добавлять и удалять администраторов может только владелец."
+            )
+        else:
+            async with SessionLocal() as session:
+                if action == "users":
+                    rows = list((await session.scalars(select(User).order_by(User.id.desc()).limit(15))).all())
+                    text = "<b>👥 Последние пользователи</b>\n\n" + ("\n".join(f"<code>{u.telegram_id}</code> · @{u.username or '—'} · {u.subscription_status.value}" for u in rows) if rows else "Пользователей нет")
+                elif action == "revenue":
+                    month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                    month = await session.scalar(select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.status == "paid", Payment.paid_at >= month_start)) or Decimal("0")
+                    total = await session.scalar(select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.status == "paid")) or Decimal("0")
+                    vip = await session.scalar(select(func.count(User.id)).where(User.subscription_status.in_([SubscriptionStatus.vip, SubscriptionStatus.active]))) or 0
+                    text = f"<b>💰 Доход и подписки</b>\n\nЗа месяц: <b>{month:,.2f} ₽</b>\nЗа всё время: <b>{total:,.2f} ₽</b>\nVIP/активных: <b>{vip}</b>"
+                elif action == "errors":
+                    rows = list((await session.scalars(select(FailedUpdate).where(FailedUpdate.resolved.is_(False)).order_by(FailedUpdate.id.desc()).limit(5))).all())
+                    text = "<b>⚠️ Последние ошибки</b>\n\n" + ("\n\n".join(f"#{e.id} {e.update_type}: {e.error[:180]}" for e in rows) if rows else "Ошибок нет.")
+                elif action == "system":
+                    queued = await session.scalar(select(func.count(Job.id)).where(Job.status == "queued")) or 0
+                    dead = await session.scalar(select(func.count(Job.id)).where(Job.status == "dead")) or 0
+                    text = f"<b>🖥 Система</b>\n\nВерсия: {settings.app_version}\nGit: {settings.git_sha}\nAPI: работает\nОчередь: {queued}\nНеуспешных заданий: {dead}"
+                else:
+                    text = "<b>📨 Рассылки</b>\n\n<code>/broadcast all Текст</code> — всем\n<code>/broadcast vip Текст</code> — VIP\n<code>/broadcast free Текст</code> — бесплатным"
+    except Exception as exc:
+        text = f"⚠️ Раздел временно недоступен. Ошибка: <code>{type(exc).__name__}</code>"
     if callback.message:
         await callback.message.answer(text, reply_markup=admin_keyboard())
     await callback.answer()
@@ -287,7 +419,8 @@ async def admin_callback(callback: CallbackQuery) -> None:
 @router.message(F.text.startswith("/"))
 async def unknown_command(message: Message) -> None:
     user_id = message.from_user.id if message.from_user else None
+    admin = await is_admin(user_id)
     commands = "/start, /app, /help"
-    if is_admin(user_id):
-        commands += ", /admin, /admin_id, /broadcast"
-    await message.answer(f"Неизвестная команда. Доступны: {commands}", reply_markup=main_keyboard(user_id))
+    if admin:
+        commands += ", /admin, /admin_id, /admins, /broadcast"
+    await message.answer(f"Неизвестная команда. Доступны: {commands}", reply_markup=main_keyboard(admin))
