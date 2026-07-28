@@ -10,29 +10,24 @@ from app.core.config import Settings, get_settings
 from app.core.security import create_token, decode_token
 from app.db.models import BusinessConnection, Dialog, Media, Message, MessageVersion
 from app.db.session import get_session
+from app.services.access import access_state, get_monetization_settings, payment_plans
 from app.services.media import safe_media_path
+from app.services.users import referral_code
 
 router = APIRouter(prefix="/api", tags=["user"])
 
 
 def avatar_url(user_id: int, dialog_id: int, settings: Settings) -> str:
-    token = create_token(
-        f"{user_id}:{dialog_id}",
-        "dialog_avatar",
-        timedelta(minutes=15),
-        settings,
-    )
+    token = create_token(f"{user_id}:{dialog_id}", "dialog_avatar", timedelta(minutes=15), settings)
     return f"/api/avatar/{token}"
 
 
 @router.get("/me")
-async def me(user: CurrentUser, session: SessionDep) -> dict:
-    connection = await session.scalar(
-        select(BusinessConnection).where(
-            BusinessConnection.owner_user_id == user.id,
-            BusinessConnection.is_active.is_(True),
-        )
-    )
+async def me(user: CurrentUser, session: SessionDep, settings: Settings = Depends(get_settings)) -> dict:
+    connection = await session.scalar(select(BusinessConnection).where(BusinessConnection.owner_user_id == user.id, BusinessConnection.is_active.is_(True)))
+    config = await get_monetization_settings(session)
+    access = await access_state(session, user)
+    referral_link = f"https://t.me/{settings.telegram_bot_username}?start=ref_{referral_code(user)}"
     return {
         "id": user.id,
         "telegram_id": user.telegram_id,
@@ -40,16 +35,41 @@ async def me(user: CurrentUser, session: SessionDep) -> dict:
         "first_name": user.first_name,
         "last_name": user.last_name,
         "business_connected": bool(connection),
+        "access": {
+            "active": access.active,
+            "source": access.source,
+            "ends_at": access.ends_at,
+            "needs_payment": access.needs_payment,
+        },
+        "monetization": {
+            "free_trial_enabled": config.free_trial_enabled,
+            "show_trial_in_profile": config.show_trial_in_profile,
+            "show_tariffs": config.show_tariffs,
+            "referral_available": user.referral_bonus_granted_at is None,
+            "referral_link": referral_link,
+            "payment_url": config.payment_placeholder_url,
+            "plans": payment_plans(config) if config.show_tariffs else [],
+            "demo": True,
+        },
+    }
+
+
+@router.get("/subscription")
+async def subscription(user: CurrentUser, session: SessionDep, settings: Settings = Depends(get_settings)) -> dict:
+    config = await get_monetization_settings(session)
+    access = await access_state(session, user)
+    return {
+        "access": {"active": access.active, "source": access.source, "ends_at": access.ends_at},
+        "plans": payment_plans(config) if config.show_tariffs else [],
+        "payment_url": config.payment_placeholder_url,
+        "referral_link": f"https://t.me/{settings.telegram_bot_username}?start=ref_{referral_code(user)}",
+        "referral_available": user.referral_bonus_granted_at is None,
+        "demo": True,
     }
 
 
 @router.get("/dialogs")
-async def dialogs(
-    user: CurrentUser,
-    session: SessionDep,
-    limit: int = Query(30, ge=1, le=100),
-    cursor: int | None = None,
-) -> dict:
+async def dialogs(user: CurrentUser, session: SessionDep, limit: int = Query(30, ge=1, le=100), cursor: int | None = None) -> dict:
     stmt = select(Dialog).where(Dialog.owner_user_id == user.id).order_by(desc(Dialog.last_message_at), desc(Dialog.id)).limit(limit + 1)
     if cursor:
         stmt = stmt.where(Dialog.id < cursor)
@@ -62,29 +82,18 @@ async def dialogs(
         last = await session.scalar(select(Message).where(Message.dialog_id == row.id).order_by(desc(Message.sent_at), desc(Message.id)).limit(1))
         count = await session.scalar(select(func.count(Message.id)).where(Message.dialog_id == row.id))
         items.append({
-            "id": row.id,
-            "peer_name": row.peer_name,
-            "peer_username": row.peer_username,
+            "id": row.id, "peer_name": row.peer_name, "peer_username": row.peer_username,
             "avatar": avatar_url(user.id, row.id, settings) if row.peer_telegram_id else None,
-            "message_count": int(count or 0),
-            "last_message_at": row.last_message_at,
+            "message_count": int(count or 0), "last_message_at": row.last_message_at,
             "last_message_text": (last.text or last.caption) if last else None,
-            "last_message_deleted": bool(last and last.is_deleted),
-            "last_message_edited": bool(last and last.edited_at),
-            "direction": last.direction if last else None,
-            "is_hidden": row.is_hidden,
+            "last_message_deleted": bool(last and last.is_deleted), "last_message_edited": bool(last and last.edited_at),
+            "direction": last.direction if last else None, "is_hidden": row.is_hidden,
         })
     return {"items": items, "next_cursor": next_cursor}
 
 
 @router.get("/dialogs/{dialog_id}")
-async def dialog_detail(
-    dialog_id: int,
-    user: CurrentUser,
-    session: SessionDep,
-    limit: int = Query(50, ge=1, le=100),
-    before_id: int | None = None,
-) -> dict:
+async def dialog_detail(dialog_id: int, user: CurrentUser, session: SessionDep, limit: int = Query(50, ge=1, le=100), before_id: int | None = None) -> dict:
     dialog = await session.scalar(select(Dialog).where(Dialog.id == dialog_id, Dialog.owner_user_id == user.id))
     if not dialog:
         raise HTTPException(status_code=404, detail="Dialog not found")
@@ -105,41 +114,19 @@ async def dialog_detail(
         if item.download_status == "downloaded" and item.storage_key:
             token = create_token(f"{user.id}:{item.id}", "media_download", timedelta(seconds=settings.media_signing_ttl_seconds), settings)
         media_by_message.setdefault(item.message_id, []).append({
-            "id": item.id,
-            "type": item.media_type,
-            "is_protected": item.is_protected,
-            "status": item.download_status,
-            "mime_type": item.mime_type,
-            "filename": item.filename,
-            "size": item.size,
-            "url": f"/api/media/download/{token}" if token else None,
+            "id": item.id, "type": item.media_type, "is_protected": item.is_protected,
+            "status": item.download_status, "mime_type": item.mime_type, "filename": item.filename,
+            "size": item.size, "url": f"/api/media/download/{token}" if token else None,
         })
     for version in version_rows:
-        versions_by_message.setdefault(version.message_id, []).append({
-            "version": version.version_number,
-            "text": version.text,
-            "caption": version.caption,
-            "created_at": version.created_at,
-        })
+        versions_by_message.setdefault(version.message_id, []).append({"version": version.version_number, "text": version.text, "caption": version.caption, "created_at": version.created_at})
     return {
-        "dialog": {
-            "id": dialog.id,
-            "peer_name": dialog.peer_name,
-            "peer_username": dialog.peer_username,
-            "avatar": avatar_url(user.id, dialog.id, settings) if dialog.peer_telegram_id else None,
-        },
+        "dialog": {"id": dialog.id, "peer_name": dialog.peer_name, "peer_username": dialog.peer_username, "avatar": avatar_url(user.id, dialog.id, settings) if dialog.peer_telegram_id else None},
         "messages": [{
-            "id": m.id,
-            "direction": m.direction,
-            "text": m.text,
-            "caption": m.caption,
-            "sent_at": m.sent_at,
-            "edited_at": m.edited_at,
-            "deleted_at": m.deleted_at,
-            "is_deleted": m.is_deleted,
-            "reply_to_message_id": m.reply_to_message_id,
-            "media": media_by_message.get(m.id, []),
-            "versions": versions_by_message.get(m.id, []),
+            "id": m.id, "direction": m.direction, "text": m.text, "caption": m.caption,
+            "sent_at": m.sent_at, "edited_at": m.edited_at, "deleted_at": m.deleted_at,
+            "is_deleted": m.is_deleted, "reply_to_message_id": m.reply_to_message_id,
+            "media": media_by_message.get(m.id, []), "versions": versions_by_message.get(m.id, []),
         } for m in reversed(rows)],
         "next_cursor": next_cursor,
     }
