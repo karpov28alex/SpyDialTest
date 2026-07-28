@@ -32,8 +32,10 @@ async def register_or_update_user(
             language_code=language_code,
             registered_at=now,
             last_seen_at=now,
+            # Registration alone does not consume the free period. The 72-hour
+            # window is activated by the first enabled BusinessConnection event.
             trial_started_at=now,
-            trial_ends_at=now + TRIAL_DURATION,
+            trial_ends_at=now,
         )
         user.settings = UserSettings(language=language_code or "ru")
         session.add(user)
@@ -47,6 +49,17 @@ async def register_or_update_user(
         user.language_code = language_code
         user.last_seen_at = now
     return user, created
+
+
+def activate_business_trial(user: User, now: datetime | None = None) -> bool:
+    """Activate the one-time 72-hour trial on first Business connection."""
+    now = now or datetime.now(UTC)
+    # A zero-length window marks a trial that has never been activated.
+    if user.trial_ends_at <= user.trial_started_at:
+        user.trial_started_at = now
+        user.trial_ends_at = now + TRIAL_DURATION
+        return True
+    return False
 
 
 def referral_code(user: User) -> str:
