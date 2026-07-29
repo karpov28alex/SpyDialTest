@@ -31,9 +31,9 @@ function polishSubscription(root) {
       <div class="subscription-card__glow" aria-hidden="true"></div>
       <div class="subscription-card__content">
         <h3>VIP-подписка</h3>
-        <p class="subscription-lead"><b>👉 Стоимость пробной VIP подписки — 1 ₽ за 1 день VIP статуса.</b></p>
-        <p class="subscription-copy">Выбирая любой из тарифов, вы соглашаетесь с автоматической пролонгацией 299 ₽ каждые 3 дня по истечению оплаченного периода. Возможно частичное списание 99 ₽ за 1 день VIP статуса.</p>
-        <p class="subscription-terms">Продолжая оплату, вы соглашаетесь с <a href="https://sms.evocloud.su/terms" target="_blank" rel="noopener noreferrer">условиями пользования</a>.</p>
+        <p class="subscription-lead"><b>👉 Стоимость пробной VIP подписки — 20 ₽ за 1 день VIP статуса.</b></p>
+        <p class="subscription-copy">Выбирая любой из тарифов, вы соглашаетесь с автоматической пролонгацией 125 ₽ каждые 7 дней по истечению оплаченного периода. Возможно частичное списание 70 ₽ за 3 дня VIP статуса.</p>
+        <p class="subscription-terms">Продолжая оплату, вы соглашаетесь с <a href="https://spy.mooncloud.ltd/terms" target="_blank" rel="noopener noreferrer">условиями пользования</a>.</p>
         <a class="retry subscription-pay" href="${href}" target="_blank" rel="noopener noreferrer">Продолжить оплату</a>
       </div>
     </section>
