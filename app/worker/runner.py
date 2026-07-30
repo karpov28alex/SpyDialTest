@@ -37,7 +37,8 @@ async def _ensure_media_downloaded(media_id: int) -> Media:
             "has_protected_content": raw.get("has_protected_content", False),
             "model_dump": lambda self, **kwargs: raw,
         })())
-        if media.is_protected is not True or not decision.allowed:
+        embedded_capture = raw.get("_capture_reason") == "embedded_reply_missing_original"
+        if media.is_protected is not True or not (decision.allowed or embedded_capture):
             media.is_protected = False
             raise RuntimeError("Protected media invariant failed: no Telegram protection signal")
         if media.download_status == "downloaded" and media.storage_key:
