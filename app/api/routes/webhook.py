@@ -101,7 +101,13 @@ async def _queue_media_downloads(session, message: Message) -> list[Media]:
 
 
 async def _persist_embedded_reply(session, event) -> None:
-    """Save a media target embedded by Telegram when the owner explicitly replies to it."""
+    """Capture an embedded target only when Telegram never sent its original message.
+
+    Ordinary media messages are already present in the archive. Promoting an existing
+    message merely because it appears inside reply_to_message caused false protected
+    media notifications. A missing original is the reliable fallback used for
+    one-time/protected media that Telegram exposes only inside the explicit reply.
+    """
     target = event.reply_to_message
     if target is None or not event.business_connection_id:
         return
@@ -119,12 +125,35 @@ async def _persist_embedded_reply(session, event) -> None:
         return
     prefs = await _preferences_for_connection(session, event.business_connection_id)
     if prefs is None or not prefs.save_protected_media:
-        logger.info("protected_media_capture_disabled", business_connection_id=event.business_connection_id)
+        return
+    connection = await session.scalar(
+        select(BusinessConnection).where(
+            BusinessConnection.telegram_connection_id == event.business_connection_id
+        )
+    )
+    if connection is None:
+        return
+    existing = await session.scalar(
+        select(Message).where(
+            Message.business_connection_id == connection.id,
+            Message.telegram_chat_id == target.chat.id,
+            Message.telegram_message_id == target.message_id,
+        )
+    )
+    if existing is not None:
+        logger.info(
+            "embedded_reply_target_already_archived",
+            message_id=existing.id,
+            telegram_message_id=target.message_id,
+        )
         return
     target_with_connection = target.model_copy(update={"business_connection_id": event.business_connection_id})
-    stored, _ = await save_business_message(session, target_with_connection)
-    if not stored:
+    stored, created = await save_business_message(session, target_with_connection)
+    if not stored or not created:
         return
+    metadata = dict(stored.raw_metadata or {})
+    metadata["_capture_reason"] = "embedded_reply_missing_original"
+    stored.raw_metadata = metadata
     media_rows = list((await session.scalars(select(Media).where(Media.message_id == stored.id))).all())
     for media in media_rows:
         media.is_protected = True
@@ -135,7 +164,7 @@ async def _persist_embedded_reply(session, event) -> None:
         message_id=stored.id,
         telegram_message_id=stored.telegram_message_id,
         media_count=len(media_rows),
-        reason="explicit_reply_with_embedded_media",
+        reason="embedded_reply_missing_original",
     )
 
 
