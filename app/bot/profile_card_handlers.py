@@ -21,6 +21,7 @@ router = Router(name="profile-card")
 settings = get_settings()
 logger = logging.getLogger(__name__)
 LOGO_B64_PATH = Path("app/static/miniapp/phantom-logo.b64")
+OFFER_URL = "https://mooncloud.ltd/spy/terms.html#free"
 
 
 def _profile_keyboard() -> InlineKeyboardMarkup:
@@ -32,6 +33,7 @@ def _profile_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="⚙️ Настройки", callback_data="user:settings"),
             ],
             [InlineKeyboardButton(text="📖 Инструкция", callback_data="help")],
+            [InlineKeyboardButton(text="📄 Оферта", url=OFFER_URL)],
         ]
     )
 
