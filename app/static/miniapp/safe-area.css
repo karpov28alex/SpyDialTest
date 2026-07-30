@@ -1,0 +1,35 @@
+:root{
+  --host-safe-top:max(var(--tg-content-safe-area-inset-top, 0px), 72px);
+  --host-safe-bottom:max(var(--tg-safe-area-inset-bottom, 0px), 22px);
+}
+body{
+  padding-top:calc(var(--host-safe-top) + 8px);
+  padding-bottom:calc(var(--host-safe-bottom) + 54px);
+}
+.topbar{
+  top:var(--host-safe-top);
+  padding-top:12px;
+  min-height:68px;
+}
+.page{
+  padding-bottom:calc(var(--host-safe-bottom) + 88px);
+}
+#version{
+  bottom:calc(var(--host-safe-bottom) + 10px);
+}
+@media(max-width:430px){
+  :root{
+    --host-safe-top:max(var(--tg-content-safe-area-inset-top, 0px), 68px);
+  }
+  .topbar{
+    gap:10px;
+    padding-left:14px;
+    padding-right:14px;
+  }
+  .topbar .title{
+    line-height:1.15;
+  }
+  .page{
+    padding-bottom:calc(var(--host-safe-bottom) + 96px);
+  }
+}
