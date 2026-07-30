@@ -14,6 +14,15 @@ from app.db.models import BusinessConnection, Dialog, Media, Message, MessageVer
 from app.services.users import activate_business_trial, register_or_update_user
 
 
+def _as_datetime(value: Any, *, fallback: datetime | None = None) -> datetime:
+    """Normalize Telegram datetime values from aiogram or raw Unix timestamps."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, tz=UTC)
+    return fallback or datetime.now(UTC)
+
+
 def update_kind(payload: dict[str, Any]) -> str:
     for key in ("business_connection", "business_message", "edited_business_message", "deleted_business_messages", "message", "callback_query"):
         if key in payload:
@@ -98,6 +107,7 @@ async def _dialog_for_message(session: AsyncSession, connection: BusinessConnect
     )
     peer = event.chat
     peer_name = " ".join(part for part in [peer.first_name, peer.last_name] if part) or peer.title
+    event_date = _as_datetime(event.date)
     if dialog is None:
         dialog = Dialog(
             owner_user_id=connection.owner_user_id,
@@ -106,14 +116,14 @@ async def _dialog_for_message(session: AsyncSession, connection: BusinessConnect
             peer_telegram_id=event.chat.id,
             peer_username=peer.username,
             peer_name=peer_name,
-            last_message_at=event.date,
+            last_message_at=event_date,
         )
         session.add(dialog)
         await session.flush()
     else:
         dialog.peer_username = peer.username
         dialog.peer_name = peer_name
-        dialog.last_message_at = max(dialog.last_message_at or event.date, event.date)
+        dialog.last_message_at = max(dialog.last_message_at or event_date, event_date)
     return dialog
 
 
@@ -165,6 +175,7 @@ async def save_business_message(session: AsyncSession, event: TgMessage) -> tupl
     if existing:
         return existing, False
     direction = "outgoing" if event.from_user and event.from_user.id == connection.business_user_id else "incoming"
+    sent_at = _as_datetime(event.date)
     message = Message(
         dialog_id=dialog.id,
         business_connection_id=connection.id,
@@ -175,7 +186,7 @@ async def save_business_message(session: AsyncSession, event: TgMessage) -> tupl
         text=event.text,
         caption=event.caption,
         reply_to_message_id=event.reply_to_message.message_id if event.reply_to_message else None,
-        sent_at=event.date,
+        sent_at=sent_at,
         raw_metadata=event.model_dump(mode="json", exclude_none=True),
     )
     session.add(message)
@@ -185,7 +196,7 @@ async def save_business_message(session: AsyncSession, event: TgMessage) -> tupl
         version_number=1,
         text=message.text,
         caption=message.caption,
-        created_at=message.sent_at,
+        created_at=sent_at,
     ))
     for data in _media_from_message(event):
         session.add(Media(message_id=message.id, **data))
@@ -212,6 +223,7 @@ async def edit_business_message(session: AsyncSession, event: TgMessage) -> tupl
     if message.text == event.text and message.caption == event.caption:
         return message, False, None
     old_content = message.text or message.caption
+    edited_at = _as_datetime(event.edit_date, fallback=datetime.now(UTC))
     current_version = int(
         await session.scalar(
             select(func.coalesce(func.max(MessageVersion.version_number), 0))
@@ -230,13 +242,14 @@ async def edit_business_message(session: AsyncSession, event: TgMessage) -> tupl
             version_number=current_version + 1,
             text=message.text,
             caption=message.caption,
-            created_at=message.edited_at or datetime.now(UTC),
+            created_at=message.edited_at or edited_at,
         ))
     message.text = event.text
     message.caption = event.caption
-    message.edited_at = event.edit_date or datetime.now(UTC)
+    message.edited_at = edited_at
     message.raw_metadata = event.model_dump(mode="json", exclude_none=True)
     connection.last_activity_at = datetime.now(UTC)
+    await session.flush()
     return message, True, old_content
 
 
