@@ -9,6 +9,7 @@ from redis.asyncio import Redis
 from sqlalchemy import text
 
 from app.api.routes.admin import router as admin_router
+from app.api.routes.admin_dialogs import router as admin_dialogs_router
 from app.api.routes.admin_explorer import router as admin_explorer_router
 from app.api.routes.admin_monetization import router as admin_monetization_router
 from app.api.routes.auth import router as auth_router
@@ -42,6 +43,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(user_router)
 app.include_router(avatar_router)
+app.include_router(admin_dialogs_router)
 app.include_router(admin_router)
 app.include_router(admin_explorer_router)
 app.include_router(admin_monetization_router)
@@ -99,16 +101,7 @@ async def mini_app_js() -> FileResponse:
     return FileResponse(
         "app/static/miniapp/app.js",
         media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=31536000, immutable"},
-    )
-
-
-@app.get("/app/subscription-ui.js", include_in_schema=False)
-async def mini_app_subscription_ui() -> FileResponse:
-    return FileResponse(
-        "app/static/miniapp/subscription-ui.js",
-        media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -117,23 +110,26 @@ async def mini_app_css() -> FileResponse:
     return FileResponse(
         "app/static/miniapp/style.css",
         media_type="text/css",
-        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        headers={"Cache-Control": "no-store"},
     )
 
 
-@app.get("/admin/monetization-ui.js", include_in_schema=False)
-async def admin_monetization_ui() -> FileResponse:
-    return FileResponse(
-        "app/static/admin/monetization-ui.js",
-        media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=31536000, immutable"},
-    )
+@app.get("/app/{asset_path:path}", include_in_schema=False)
+async def mini_app_asset(asset_path: str):
+    path = Path("app/static/miniapp") / asset_path
+    if not path.is_file():
+        return FileResponse("app/static/miniapp/index.html", headers={"Cache-Control": "no-store"})
+    return FileResponse(path, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/admin", include_in_schema=False)
-async def admin_page() -> HTMLResponse:
-    html = Path("app/static/admin/index.html").read_text(encoding="utf-8")
-    marker = '<script src="/admin/monetization-ui.js?v=0.6.4" defer></script>'
-    if marker not in html:
-        html = html.replace("</body>", f"{marker}</body>")
-    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+async def admin_app() -> FileResponse:
+    return FileResponse("app/static/admin/index.html", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/admin/{asset_path:path}", include_in_schema=False)
+async def admin_asset(asset_path: str):
+    path = Path("app/static/admin") / asset_path
+    if not path.is_file():
+        return FileResponse("app/static/admin/index.html", headers={"Cache-Control": "no-store"})
+    return FileResponse(path, headers={"Cache-Control": "no-store"})
