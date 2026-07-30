@@ -55,28 +55,26 @@ def format_edit_notification(
     message: Message,
     versions: Iterable[MessageVersion],
 ) -> str:
-    if settings.hide_preview:
-        return (
-            f"❗️ <b>{actor_name(dialog)} изменил(а) сообщение</b>\n\n"
-            "Откройте Dialog Spy, чтобы посмотреть старую и новую версии."
-        )
+    # Message history is the core feature of the service, therefore edit
+    # notifications always contain both versions even when generic previews
+    # are hidden in other notification types.
     return (
-        f"❗️ <b>{actor_name(dialog)} изменил(а) сообщение:</b>\n\n"
+        f"❗️ <b>{actor_name(dialog)} изменил(а) сообщение</b>\n"
+        f"🕓 <b>Отправлено:</b> {_timestamp(message.sent_at)}\n"
+        f"✏️ <b>Изменено:</b> {_timestamp(message.edited_at)}\n\n"
         f"<b>Старое сообщение:</b>\n<blockquote>{_previous_content(message, versions)}</blockquote>\n\n"
         f"<b>Новое сообщение:</b>\n<blockquote>{safe_content(message.text or message.caption)}</blockquote>"
     )
 
 
 def format_delete_notification(*, dialog: Dialog, settings: UserSettings, message: Message) -> str:
-    saved = (
-        "Откройте Dialog Spy, чтобы посмотреть сохранённую копию."
-        if settings.hide_preview
-        else f"<blockquote>{safe_content(message.text or message.caption)}</blockquote>"
-    )
+    # Deleted content must remain available in Telegram without requiring the
+    # Mini App; this is independent from the generic preview preference.
+    saved = f"<blockquote>{safe_content(message.text or message.caption)}</blockquote>"
     return (
         f"🗑 <b>{actor_name(dialog)} удалил сообщение</b>\n"
-        f"<b>Отправлено:</b> {_timestamp(message.sent_at)}\n"
-        f"<b>Удалено:</b> {_timestamp(message.deleted_at)}\n\n"
+        f"🕓 <b>Отправлено:</b> {_timestamp(message.sent_at)}\n"
+        f"🕓 <b>Удалено:</b> {_timestamp(message.deleted_at)}\n\n"
         f"<b>Сохранённое содержимое:</b>\n{saved}"
     )
 
