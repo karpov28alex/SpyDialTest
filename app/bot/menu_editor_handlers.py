@@ -4,11 +4,9 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
-from redis import Redis as SyncRedis
-from redis.asyncio import Redis as AsyncRedis
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from redis.asyncio import Redis
 
-from app.bot import profile_card_handlers, user_handlers
 from app.bot.handlers import INSTRUCTION_KEY, is_admin
 from app.core.config import get_settings
 
@@ -16,56 +14,20 @@ router = Router(name="menu-editor")
 settings = get_settings()
 CONTENT_KEY = "dialog_spy:user_menu_content"
 DEFAULTS = {
-    "profile": "Статистика обновляется при каждом открытии профиля.",
     "settings": "Зелёная отметка означает, что функция включена. Нажмите кнопку для переключения.",
     "offer_url": "https://mooncloud.ltd/spy/terms.html#free",
+    "show_offer": "1",
 }
 
 
 class MenuEdit(StatesGroup):
-    profile = State()
     settings = State()
     offer = State()
     instruction = State()
 
 
-def _sync_content() -> dict[str, str]:
-    redis = SyncRedis.from_url(settings.redis_url, decode_responses=True, socket_timeout=1)
-    try:
-        data = redis.hgetall(CONTENT_KEY)
-        return {**DEFAULTS, **{key: value for key, value in data.items() if value}}
-    except Exception:
-        return dict(DEFAULTS)
-    finally:
-        redis.close()
-
-
-def configurable_user_keyboard() -> InlineKeyboardMarkup:
-    content = _sync_content()
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Открыть Dialog Spy", web_app=WebAppInfo(url=settings.mini_app_url))],
-        [
-            InlineKeyboardButton(text="👤 Профиль", callback_data="user:profile"),
-            InlineKeyboardButton(text="⚙️ Настройки", callback_data="user:settings"),
-        ],
-        [InlineKeyboardButton(text="📖 Инструкция", callback_data="help")],
-        [InlineKeyboardButton(text="📄 Оферта", url=content["offer_url"])],
-    ])
-
-
-def editor_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 Текст профиля", callback_data="menuedit:profile")],
-        [InlineKeyboardButton(text="⚙️ Текст настроек", callback_data="menuedit:settings")],
-        [InlineKeyboardButton(text="📄 Ссылка оферты", callback_data="menuedit:offer")],
-        [InlineKeyboardButton(text="📖 Текст инструкции", callback_data="menuedit:instruction")],
-        [InlineKeyboardButton(text="👁 Предпросмотр", callback_data="menuedit:preview")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="menuedit:cancel")],
-    ])
-
-
 async def get_menu_content() -> dict[str, str]:
-    redis = AsyncRedis.from_url(settings.redis_url, decode_responses=True)
+    redis = Redis.from_url(settings.redis_url, decode_responses=True)
     try:
         data = await redis.hgetall(CONTENT_KEY)
     finally:
@@ -74,7 +36,7 @@ async def get_menu_content() -> dict[str, str]:
 
 
 async def set_menu_content(field: str, value: str) -> None:
-    redis = AsyncRedis.from_url(settings.redis_url, decode_responses=True)
+    redis = Redis.from_url(settings.redis_url, decode_responses=True)
     try:
         if field == "instruction":
             await redis.hset(INSTRUCTION_KEY, "text", value)
@@ -84,24 +46,28 @@ async def set_menu_content(field: str, value: str) -> None:
         await redis.aclose()
 
 
-# Replace all ordinary user keyboards with the configurable version. Existing
-# handlers resolve these module globals at call time, so changes apply without restart.
-user_handlers.user_keyboard = configurable_user_keyboard
-profile_card_handlers._profile_keyboard = configurable_user_keyboard
-_original_send_profile = profile_card_handlers._send_profile
+def editor_keyboard(show_offer: bool = True) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚙️ Текст настроек", callback_data="menuedit:settings")],
+        [InlineKeyboardButton(text="📄 Ссылка оферты", callback_data="menuedit:offer")],
+        [InlineKeyboardButton(
+            text=f"{'✅' if show_offer else '❌'} Кнопка «Оферта»",
+            callback_data="menuedit:toggle_offer",
+        )],
+        [InlineKeyboardButton(text="📖 Текст инструкции", callback_data="menuedit:instruction")],
+        [InlineKeyboardButton(text="👁 Предпросмотр", callback_data="menuedit:preview")],
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="menuedit:cancel")],
+    ])
 
 
-async def _send_profile_with_custom_text(target: Message, telegram_id: int) -> None:
-    content = await get_menu_content()
-    await target.answer(f"<b>👤 Профиль Phantom</b>\n\n{content['profile']}")
-    await _original_send_profile(target, telegram_id)
-
-
-profile_card_handlers._send_profile = _send_profile_with_custom_text
+async def _editor_markup() -> InlineKeyboardMarkup:
+    data = await get_menu_content()
+    return editor_keyboard(data.get("show_offer", "1") == "1")
 
 
 @router.message(Command("settings"))
 async def configurable_settings_command(message: Message) -> None:
+    from app.bot import user_handlers
     if not message.from_user:
         return
     prefs = await user_handlers._settings(message.from_user.id)
@@ -117,6 +83,7 @@ async def configurable_settings_command(message: Message) -> None:
 
 @router.callback_query(F.data == "user:settings")
 async def configurable_settings_callback(callback: CallbackQuery) -> None:
+    from app.bot import user_handlers
     prefs = await user_handlers._settings(callback.from_user.id)
     if callback.message and prefs:
         content = await get_menu_content()
@@ -133,8 +100,8 @@ async def menu_editor(message: Message) -> None:
         await message.answer("Команда недоступна.")
         return
     await message.answer(
-        "<b>Редактор пользовательского меню</b>\n\nВыберите раздел, который хотите изменить.",
-        reply_markup=editor_keyboard(),
+        "<b>Редактор пользовательского меню</b>\n\nНастройте текст, ссылку и видимость оферты.",
+        reply_markup=await _editor_markup(),
     )
 
 
@@ -146,22 +113,30 @@ async def menu_editor_callback(callback: CallbackQuery, state: FSMContext) -> No
     action = callback.data.split(":", 1)[1]
     if action == "cancel":
         await state.clear()
-        await callback.answer("Отменено")
+        await callback.answer("Закрыто")
+        return
+    if action == "toggle_offer":
+        data = await get_menu_content()
+        enabled = data.get("show_offer", "1") == "1"
+        await set_menu_content("show_offer", "0" if enabled else "1")
+        if callback.message:
+            await callback.message.edit_reply_markup(reply_markup=await _editor_markup())
+        await callback.answer("Кнопка оферты выключена" if enabled else "Кнопка оферты включена")
         return
     if action == "preview":
         data = await get_menu_content()
+        status = "показывается" if data.get("show_offer", "1") == "1" else "скрыта"
         text = (
             "<b>Текущие настройки меню</b>\n\n"
-            f"<b>Профиль:</b> {data['profile']}\n\n"
             f"<b>Настройки:</b> {data['settings']}\n\n"
-            f"<b>Оферта:</b> {data['offer_url']}"
+            f"<b>Оферта:</b> {data['offer_url']}\n"
+            f"<b>Кнопка оферты:</b> {status}"
         )
         if callback.message:
-            await callback.message.answer(text, reply_markup=editor_keyboard())
+            await callback.message.answer(text, reply_markup=await _editor_markup())
         await callback.answer()
         return
     state_map = {
-        "profile": MenuEdit.profile,
         "settings": MenuEdit.settings,
         "offer": MenuEdit.offer,
         "instruction": MenuEdit.instruction,
@@ -177,11 +152,6 @@ async def menu_editor_callback(callback: CallbackQuery, state: FSMContext) -> No
     if callback.message:
         await callback.message.answer(prompt)
     await callback.answer()
-
-
-@router.message(MenuEdit.profile)
-async def save_profile_text(message: Message, state: FSMContext) -> None:
-    await _save_text(message, state, "profile")
 
 
 @router.message(MenuEdit.settings)
@@ -202,7 +172,7 @@ async def save_offer_url(message: Message, state: FSMContext) -> None:
         return
     await set_menu_content("offer_url", value)
     await state.clear()
-    await message.answer("✅ Ссылка оферты сохранена.", reply_markup=editor_keyboard())
+    await message.answer("✅ Ссылка оферты сохранена.", reply_markup=await _editor_markup())
 
 
 async def _save_text(message: Message, state: FSMContext, field: str) -> None:
@@ -212,4 +182,4 @@ async def _save_text(message: Message, state: FSMContext, field: str) -> None:
         return
     await set_menu_content(field, value)
     await state.clear()
-    await message.answer("✅ Изменения сохранены.", reply_markup=editor_keyboard())
+    await message.answer("✅ Изменения сохранены.", reply_markup=await _editor_markup())
