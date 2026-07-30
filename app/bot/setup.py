@@ -8,17 +8,17 @@ settings = get_settings()
 bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dispatcher = Dispatcher()
 
-# Specific routers are registered before the generic user router so exact
-# callbacks and commands are handled deterministically.
+# Specific routers are registered before generic command routers.
 from app.bot.menu_editor_handlers import router as menu_editor_router  # noqa: E402
 from app.bot.admin_menu_editor_patch import router as admin_menu_editor_router  # noqa: E402
 from app.bot.profile_card_handlers import router as profile_card_router  # noqa: E402
-from app.bot.statistics_card_handlers import router as statistics_card_router  # noqa: E402
+from app.bot.statistics_card_v2_handlers import router as statistics_card_router  # noqa: E402
+from app.bot.user_experience_handlers import router as user_experience_router  # noqa: E402
 from app.bot.archive_handlers import router as archive_router  # noqa: E402
 from app.bot import profile_card_handlers, user_handlers  # noqa: E402
 from app.bot.enhanced_user_menu import enhanced_user_keyboard  # noqa: E402
 
-# Keep one consistent keyboard in /start, profile, statistics and settings.
+# Keep one consistent, dynamically configurable keyboard everywhere.
 user_handlers.user_keyboard = enhanced_user_keyboard
 profile_card_handlers._profile_keyboard = enhanced_user_keyboard
 
@@ -26,5 +26,6 @@ dispatcher.include_router(menu_editor_router)
 dispatcher.include_router(admin_menu_editor_router)
 dispatcher.include_router(statistics_card_router)
 dispatcher.include_router(profile_card_router)
+dispatcher.include_router(user_experience_router)
 dispatcher.include_router(archive_router)
 dispatcher.include_router(user_handlers.router)
