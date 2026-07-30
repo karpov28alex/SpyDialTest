@@ -21,6 +21,7 @@ from app.services.users import register_or_update_user
 
 router = Router(name="user-menu")
 settings = get_settings()
+OFFER_URL = "https://mooncloud.ltd/spy/terms.html#free"
 
 
 def user_keyboard() -> InlineKeyboardMarkup:
@@ -32,6 +33,7 @@ def user_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="⚙️ Настройки", callback_data="user:settings"),
             ],
             [InlineKeyboardButton(text="📖 Инструкция", callback_data="help")],
+            [InlineKeyboardButton(text="📄 Оферта", url=OFFER_URL)],
         ]
     )
 
