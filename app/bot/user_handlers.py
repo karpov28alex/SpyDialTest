@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
@@ -111,6 +111,7 @@ async def _profile_text(telegram_id: int) -> str:
             ) or 0
         )
         last_activity = connection.last_activity_at if connection else None
+        last_activity_text = last_activity.strftime("%d.%m.%Y %H:%M") if last_activity else "нет данных"
         return (
             "<b>👤 Профиль Dialog Spy</b>\n\n"
             f"Telegram Business: <b>{'подключён' if connection else 'не подключён'}</b>\n"
@@ -118,7 +119,7 @@ async def _profile_text(telegram_id: int) -> str:
             f"Сообщений сохранено: <b>{messages_count}</b>\n"
             f"Изменённых: <b>{edited_count}</b> · удалённых: <b>{deleted_count}</b>\n"
             f"Скрытых медиа: <b>{protected_count}</b>\n"
-            f"Последняя активность: <b>{last_activity:%d.%m.%Y %H:%M if last_activity else 'нет данных'}</b>"
+            f"Последняя активность: <b>{last_activity_text}</b>"
         )
 
 
@@ -145,7 +146,7 @@ async def _subscription_text(telegram_id: int) -> str:
             .where(
                 Subscription.user_id == user.id,
                 Subscription.status.in_(["active", "vip"]),
-                Subscription.ends_at > datetime.utcnow(),
+                Subscription.ends_at > datetime.now(UTC),
             )
             .order_by(Subscription.ends_at.desc())
         )
@@ -170,7 +171,7 @@ async def cancel_subscription(telegram_id: int) -> bool:
             .where(
                 Subscription.user_id == user.id,
                 Subscription.status.in_(["active", "vip"]),
-                Subscription.ends_at > datetime.utcnow(),
+                Subscription.ends_at > datetime.now(UTC),
             )
             .order_by(Subscription.ends_at.desc())
             .with_for_update()
