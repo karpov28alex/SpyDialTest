@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import BaseFilter, Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from app.bot.handlers import instruction_content, is_admin
+from app.bot.handlers import instruction_content
 
 router = Router(name="user-experience")
 
@@ -43,12 +43,17 @@ KNOWN_COMMANDS = {
 }
 
 
-@router.message(F.text.startswith("/"))
+class UnknownCommandFilter(BaseFilter):
+    async def __call__(self, message: Message) -> bool:
+        text = message.text or ""
+        if not text.startswith("/"):
+            return False
+        raw = text.split(maxsplit=1)[0]
+        command = raw[1:].split("@", 1)[0].lower()
+        return bool(command) and command not in KNOWN_COMMANDS
+
+
+@router.message(UnknownCommandFilter())
 async def silent_unknown_command(message: Message) -> None:
-    raw = (message.text or "").split(maxsplit=1)[0]
-    command = raw[1:].split("@", 1)[0].lower()
-    if command in KNOWN_COMMANDS:
-        return
-    # Unknown commands are intentionally ignored. Admin-only commands are
-    # handled by their dedicated handlers and return an explicit access error.
+    # Intentionally no response for unsupported commands.
     return
