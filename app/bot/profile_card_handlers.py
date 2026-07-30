@@ -66,7 +66,6 @@ def _render_card(data: dict) -> bytes:
     width, height = 1200, 720
     image = Image.new("RGB", (width, height), "#05040d")
     draw = ImageDraw.Draw(image)
-
     for y in range(height):
         ratio = y / height
         draw.line((0, y, width, y), fill=(8 + int(10 * ratio), 5, 20 + int(18 * ratio)))
@@ -93,16 +92,16 @@ def _render_card(data: dict) -> bytes:
     draw.text((82, 265), status_text, font=_font(27, True), fill=status_color)
 
     cards = [
-        ("💬", "Диалоги", data["dialogs"]),
-        ("📦", "Сообщения", data["messages"]),
-        ("✏", "Изменения", data["edited"]),
-        ("🗑", "Удаления", data["deleted"]),
-        ("🔐", "Скрытые медиа", data["protected"]),
+        ("◆", "Диалоги", data["dialogs"]),
+        ("▣", "Сообщения", data["messages"]),
+        ("✎", "Изменения", data["edited"]),
+        ("×", "Удаления", data["deleted"]),
+        ("◈", "Скрытые медиа", data["protected"]),
     ]
     x_positions = [82, 300, 518, 736, 954]
     for x, (icon, label, value) in zip(x_positions, cards, strict=True):
         draw.rounded_rectangle((x, 334, x + 184, 562), radius=28, fill="#171025", outline="#3d275b", width=2)
-        draw.text((x + 20, 357), icon, font=_font(35), fill="#b36cff")
+        draw.text((x + 20, 357), icon, font=_font(35, True), fill="#b36cff")
         draw.text((x + 20, 421), str(value), font=stat_font, fill="white")
         draw.text((x + 20, 492), label, font=label_font, fill="#a99dbb")
 
@@ -126,11 +125,13 @@ async def _send_profile(target: Message, telegram_id: int) -> None:
         await target.answer("Профиль ещё не создан. Отправьте /start.")
         return
     card = BufferedInputFile(_render_card(data), filename="phantom-profile.png")
-    caption = (
-        "<b>👤 Ваш профиль Phantom</b>\n\n"
-        "Карточка собирается заново при каждом открытии и показывает актуальную статистику архива."
+    await target.answer_photo(
+        card,
+        caption=(
+            "<b>👤 Ваш профиль Phantom</b>\n\n"
+            "Карточка собирается заново при каждом открытии и показывает актуальную статистику архива."
+        ),
     )
-    await target.answer_photo(card, caption=caption)
 
 
 @router.message(Command("profile"))
