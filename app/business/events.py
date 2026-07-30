@@ -29,12 +29,23 @@ def dialog_name(dialog: Dialog) -> str:
     return html.escape(str(dialog.peer_name or dialog.peer_username or dialog.telegram_chat_id))
 
 
-def _icon(settings: UserSettings, value: str) -> str:
-    return value if settings.notify_emoji else ""
+def actor_name(dialog: Dialog) -> str:
+    if dialog.peer_username:
+        username = str(dialog.peer_username).lstrip("@")
+        return f"@{html.escape(username)}"
+    return dialog_name(dialog)
 
 
 def _timestamp(value: datetime | None) -> str:
     return (value or datetime.now(UTC)).astimezone(UTC).strftime("%d.%m.%Y · %H:%M:%S")
+
+
+def _previous_content(message: Message, versions: Iterable[MessageVersion]) -> str:
+    ordered = sorted(versions, key=lambda item: item.version_number)
+    if ordered:
+        last = ordered[-1]
+        return safe_content(last.text or last.caption)
+    return safe_content(None)
 
 
 def format_edit_notification(
@@ -44,54 +55,26 @@ def format_edit_notification(
     message: Message,
     versions: Iterable[MessageVersion],
 ) -> str:
-    title = f"{_icon(settings, '✏️ ')}<b>СООБЩЕНИЕ ИЗМЕНЕНО</b>"
     if settings.hide_preview:
         return (
-            f"{title}\n━━━━━━━━━━━━━━━━━━\n"
-            f"👤 {dialog_name(dialog)}\n💬 <b>Диалог:</b> {dialog_name(dialog)}\n"
-            f"🕓 {_timestamp(message.edited_at)}\n\n"
-            "Откройте Dialog Spy, чтобы посмотреть все версии."
+            f"❗️ <b>{actor_name(dialog)} изменил(а) сообщение</b>\n\n"
+            "Откройте Dialog Spy, чтобы посмотреть старую и новую версии."
         )
-
-    parts = [
-        title,
-        "━━━━━━━━━━━━━━━━━━",
-        f"👤 {dialog_name(dialog)}",
-        f"💬 <b>Диалог:</b> {dialog_name(dialog)}",
-        f"🕓 {_timestamp(message.edited_at)}",
-        "",
-    ]
-    ordered = sorted(versions, key=lambda item: item.version_number)
-    for version in ordered:
-        parts.extend(
-            [
-                f"<b>Версия {version.version_number}</b>",
-                f"🕓 {_timestamp(version.created_at)}",
-                safe_content(version.text or version.caption),
-                "",
-            ]
-        )
-    parts.extend(
-        [
-            "<b>Текущая версия</b>",
-            f"🕓 {_timestamp(message.edited_at)}",
-            safe_content(message.text or message.caption),
-            "━━━━━━━━━━━━━━━━━━",
-            "Все версии сохранены в истории диалога.",
-        ]
+    return (
+        f"❗️ <b>{actor_name(dialog)} изменил(а) сообщение:</b>\n\n"
+        f"<b>Старое сообщение:</b>\n<blockquote>{_previous_content(message, versions)}</blockquote>\n\n"
+        f"<b>Новое сообщение:</b>\n<blockquote>{safe_content(message.text or message.caption)}</blockquote>"
     )
-    return "\n".join(parts)
 
 
 def format_delete_notification(*, dialog: Dialog, settings: UserSettings, message: Message) -> str:
-    title = f"{_icon(settings, '🗑 ')}<b>Сообщение удалено</b>"
     saved = (
         "Откройте Dialog Spy, чтобы посмотреть сохранённую копию."
         if settings.hide_preview
         else f"<blockquote>{safe_content(message.text or message.caption)}</blockquote>"
     )
     return (
-        f"{title}\n\n<b>Диалог:</b> {dialog_name(dialog)}\n"
+        f"🗑 <b>{actor_name(dialog)} удалил сообщение</b>\n"
         f"<b>Отправлено:</b> {_timestamp(message.sent_at)}\n"
         f"<b>Удалено:</b> {_timestamp(message.deleted_at)}\n\n"
         f"<b>Сохранённое содержимое:</b>\n{saved}"
