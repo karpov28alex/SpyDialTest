@@ -10,12 +10,7 @@ from sqlalchemy import select
 from app.bot.admin_handlers import router as admin_router
 from app.bot.handlers import router as command_router
 from app.bot.setup import bot, dispatcher
-from app.business.events import (
-    format_delete_notification,
-    format_edit_notification,
-    is_protected_message,
-    protected_reply_is_allowed,
-)
+from app.business.events import format_delete_notification, format_edit_notification, protected_reply_is_allowed
 from app.core.config import get_settings
 from app.db.models import BusinessConnection, Dialog, FailedUpdate, Media, Message, MessageVersion, User, UserSettings
 from app.db.session import SessionLocal
@@ -38,6 +33,15 @@ dispatcher.include_router(command_router)
 redis = Redis.from_url(settings.redis_url, decode_responses=True)
 
 
+async def _ensure_preferences(session, user: User) -> UserSettings:
+    prefs = user.settings or await session.get(UserSettings, user.id)
+    if prefs is None:
+        prefs = UserSettings(user_id=user.id, language=user.language_code or "ru")
+        session.add(prefs)
+        await session.flush()
+    return prefs
+
+
 async def _owner_context(session, message: Message) -> tuple[User, Dialog, UserSettings] | None:
     dialog = await session.get(Dialog, message.dialog_id)
     if dialog is None:
@@ -45,28 +49,27 @@ async def _owner_context(session, message: Message) -> tuple[User, Dialog, UserS
     user = await session.get(User, dialog.owner_user_id)
     if user is None:
         return None
-    prefs = user.settings or await session.get(UserSettings, user.id)
-    if prefs is None:
-        return None
-    return user, dialog, prefs
+    return user, dialog, await _ensure_preferences(session, user)
 
 
 async def _preferences_for_connection(session, connection_id: str) -> UserSettings | None:
-    return await session.scalar(
-        select(UserSettings)
-        .join(BusinessConnection, BusinessConnection.owner_user_id == UserSettings.user_id)
-        .where(BusinessConnection.telegram_connection_id == connection_id)
+    connection = await session.scalar(
+        select(BusinessConnection).where(BusinessConnection.telegram_connection_id == connection_id)
     )
-
-
-async def _queue_connection_notification(session, *, update_id: int, connection) -> None:
+    if connection is None:
+        return None
     user = await session.get(User, connection.owner_user_id)
-    if (
-        not user
-        or not user.settings
-        or not user.settings.notifications_enabled
-        or not user.settings.notify_connection
-    ):
+    if user is None:
+        return None
+    return await _ensure_preferences(session, user)
+
+
+async def _queue_connection_notification(session, *, update_id: int, connection: BusinessConnection) -> None:
+    user = await session.get(User, connection.owner_user_id)
+    if not user:
+        return
+    prefs = await _ensure_preferences(session, user)
+    if not prefs.notifications_enabled or not prefs.notify_connection:
         return
     text = (
         "✅ <b>Telegram Business подключён</b>\n\nDialog Spy начал сохранять поддерживаемые бизнес-диалоги."
@@ -85,6 +88,8 @@ async def _queue_connection_notification(session, *, update_id: int, connection)
 async def _queue_media_downloads(session, message: Message) -> list[Media]:
     rows = list((await session.scalars(select(Media).where(Media.message_id == message.id))).all())
     for media in rows:
+        if media.download_status == "downloaded":
+            continue
         await enqueue_job(
             session,
             redis,
@@ -96,34 +101,42 @@ async def _queue_media_downloads(session, message: Message) -> list[Media]:
 
 
 async def _persist_embedded_reply(session, event) -> None:
-    """Archive a protected/view-once reply target only when the owner enabled it."""
+    """Save a media target embedded by Telegram when the owner explicitly replies to it."""
     target = event.reply_to_message
     if target is None or not event.business_connection_id:
         return
+    has_media = any((
+        target.photo,
+        target.video,
+        target.voice,
+        target.video_note,
+        target.document,
+        target.animation,
+        target.audio,
+        target.sticker,
+    ))
+    if not has_media:
+        return
     prefs = await _preferences_for_connection(session, event.business_connection_id)
     if prefs is None or not prefs.save_protected_media:
-        logger.info(
-            "protected_media_capture_disabled",
-            business_connection_id=event.business_connection_id,
-        )
+        logger.info("protected_media_capture_disabled", business_connection_id=event.business_connection_id)
         return
-    decision = is_protected_message(target)
-    if not decision.allowed:
+    target_with_connection = target.model_copy(update={"business_connection_id": event.business_connection_id})
+    stored, _ = await save_business_message(session, target_with_connection)
+    if not stored:
         return
-    if not any((target.photo, target.video, target.voice, target.video_note, target.document, target.animation, target.audio, target.sticker)):
-        return
-    target_with_connection = target.model_copy(
-        update={"business_connection_id": event.business_connection_id}
+    media_rows = list((await session.scalars(select(Media).where(Media.message_id == stored.id))).all())
+    for media in media_rows:
+        media.is_protected = True
+    await session.flush()
+    await _queue_media_downloads(session, stored)
+    logger.info(
+        "embedded_protected_reply_archived",
+        message_id=stored.id,
+        telegram_message_id=stored.telegram_message_id,
+        media_count=len(media_rows),
+        reason="explicit_reply_with_embedded_media",
     )
-    stored, created = await save_business_message(session, target_with_connection)
-    if stored and created:
-        await _queue_media_downloads(session, stored)
-        logger.info(
-            "embedded_protected_reply_archived",
-            message_id=stored.id,
-            telegram_message_id=stored.telegram_message_id,
-            reason=decision.reason,
-        )
 
 
 async def _queue_protected_reply(session, reply_message: Message) -> None:
@@ -163,8 +176,6 @@ async def _queue_protected_reply(session, reply_message: Message) -> None:
             reason=decision.reason,
         )
         return
-    # The media remains available in Mini App when capture is enabled. Telegram
-    # delivery additionally obeys the master notification switch.
     if not prefs.notifications_enabled or not prefs.notify_protected_media:
         return
     await enqueue_job(
@@ -222,26 +233,24 @@ async def _handle_webhook(
                     context = await _owner_context(session, message)
                     if context and context[2].notifications_enabled and context[2].notify_edits:
                         user, dialog, prefs = context
-                        versions = list(
-                            (
-                                await session.scalars(
-                                    select(MessageVersion)
-                                    .where(MessageVersion.message_id == message.id)
-                                    .order_by(MessageVersion.version_number)
-                                )
-                            ).all()
-                        )
-                        text = format_edit_notification(
-                            dialog=dialog,
-                            settings=prefs,
-                            message=message,
-                            versions=versions,
-                        )
+                        versions = list((await session.scalars(
+                            select(MessageVersion)
+                            .where(MessageVersion.message_id == message.id)
+                            .order_by(MessageVersion.version_number)
+                        )).all())
                         await enqueue_job(
                             session,
                             redis,
                             kind="send_text",
-                            payload={"telegram_id": user.telegram_id, "text": text},
+                            payload={
+                                "telegram_id": user.telegram_id,
+                                "text": format_edit_notification(
+                                    dialog=dialog,
+                                    settings=prefs,
+                                    message=message,
+                                    versions=versions,
+                                ),
+                            },
                             idempotency_key=f"edit:{update_id}:{message.id}",
                         )
 
@@ -273,18 +282,16 @@ async def _handle_webhook(
     except Exception as exc:
         logger.exception("telegram_update_failed", update_id=update_id, kind=kind, correlation_id=correlation_id)
         async with SessionLocal() as session, session.begin():
-            session.add(
-                FailedUpdate(
-                    update_id=update_id,
-                    update_type=kind,
-                    payload=payload,
-                    error=str(exc),
-                    stack_trace=traceback.format_exc(),
-                    attempts=1,
-                    resolved=False,
-                    correlation_id=correlation_id,
-                )
-            )
+            session.add(FailedUpdate(
+                update_id=update_id,
+                update_type=kind,
+                payload=payload,
+                error=str(exc),
+                stack_trace=traceback.format_exc(),
+                attempts=1,
+                resolved=False,
+                correlation_id=correlation_id,
+            ))
         return {"ok": True}
 
 
