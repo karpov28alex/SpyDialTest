@@ -4,11 +4,12 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import text
 
 from app.api.routes.admin import router as admin_router
+from app.api.routes.admin_analytics import router as admin_analytics_router
 from app.api.routes.admin_dialogs import router as admin_dialogs_router
 from app.api.routes.admin_explorer import router as admin_explorer_router
 from app.api.routes.admin_monetization import router as admin_monetization_router
@@ -47,6 +48,7 @@ app.include_router(admin_dialogs_router)
 app.include_router(admin_router)
 app.include_router(admin_explorer_router)
 app.include_router(admin_monetization_router)
+app.include_router(admin_analytics_router)
 app.include_router(webhook_router)
 app.include_router(webhook_compat_router)
 
