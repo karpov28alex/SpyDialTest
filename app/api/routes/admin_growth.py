@@ -4,9 +4,8 @@ import csv
 import io
 import json
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
@@ -14,11 +13,12 @@ from sqlalchemy import and_, exists, func, or_, select
 
 from app.api.routes.admin import AdminAuth, Session, serialize_user
 from app.core.config import Settings, get_settings
-from app.db.models import BusinessConnection, Payment, Referral, User
+from app.db.models import BusinessConnection, Payment, Referral, SubscriptionStatus, User
 
 router = APIRouter(prefix="/api/admin/growth", tags=["admin-growth"])
 CAMPAIGNS_KEY = "phantom:admin:campaigns"
 AUDIT_KEY = "phantom:admin:audit"
+USER_META_KEY = "phantom:admin:user-meta"
 
 
 class CampaignPatch(BaseModel):
@@ -26,6 +26,16 @@ class CampaignPatch(BaseModel):
     platform: str = Field(default="", max_length=120)
     cost_rub: float = Field(default=0, ge=0, le=100_000_000)
     note: str = Field(default="", max_length=1000)
+
+
+class UserMetaPatch(BaseModel):
+    note: str = Field(default="", max_length=4000)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+
+
+class UserAccessPatch(BaseModel):
+    disabled: bool
+    reason: str = Field(default="", max_length=500)
 
 
 def _now() -> datetime:
@@ -38,15 +48,31 @@ def _redis(settings: Settings) -> Redis:
 
 async def _audit(settings: Settings, admin: str, action: str, details: dict) -> None:
     client = _redis(settings)
-    payload = json.dumps({
-        "at": _now().isoformat(),
-        "admin": admin,
-        "action": action,
-        "details": details,
-    }, ensure_ascii=False)
+    payload = json.dumps(
+        {"at": _now().isoformat(), "admin": admin, "action": action, "details": details},
+        ensure_ascii=False,
+    )
     await client.lpush(AUDIT_KEY, payload)
-    await client.ltrim(AUDIT_KEY, 0, 999)
+    await client.ltrim(AUDIT_KEY, 0, 1999)
     await client.aclose()
+
+
+async def _read_user_meta(settings: Settings, user_id: int) -> dict:
+    client = _redis(settings)
+    raw = await client.hget(USER_META_KEY, str(user_id))
+    await client.aclose()
+    if not raw:
+        return {"note": "", "tags": [], "updated_at": None, "updated_by": None}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"note": "", "tags": [], "updated_at": None, "updated_by": None}
+    return {
+        "note": str(data.get("note") or ""),
+        "tags": [str(tag) for tag in data.get("tags", [])][:20],
+        "updated_at": data.get("updated_at"),
+        "updated_by": data.get("updated_by"),
+    }
 
 
 @router.get("/campaigns")
@@ -60,20 +86,31 @@ async def campaigns(
     client = _redis(settings)
     raw_meta = await client.hgetall(CAMPAIGNS_KEY)
     await client.aclose()
-    metadata = {code: json.loads(value) for code, value in raw_meta.items()}
+    metadata = {}
+    for code, value in raw_meta.items():
+        try:
+            metadata[code] = json.loads(value)
+        except json.JSONDecodeError:
+            metadata[code] = {}
 
-    rows = (await session.execute(
-        select(
-            Referral.code,
-            func.count(func.distinct(Referral.referred_user_id)).label("registrations"),
-            func.count(func.distinct(Payment.user_id)).filter(Payment.status == "paid").label("buyers"),
-            func.coalesce(func.sum(Payment.amount).filter(Payment.status == "paid"), 0).label("revenue"),
+    rows = (
+        await session.execute(
+            select(
+                Referral.code,
+                func.count(func.distinct(Referral.referred_user_id)).label("registrations"),
+                func.count(func.distinct(Payment.user_id))
+                .filter(Payment.status == "paid")
+                .label("buyers"),
+                func.coalesce(func.sum(Payment.amount).filter(Payment.status == "paid"), 0).label(
+                    "revenue"
+                ),
+            )
+            .outerjoin(Payment, Payment.user_id == Referral.referred_user_id)
+            .where(Referral.joined_at >= start)
+            .group_by(Referral.code)
+            .order_by(func.count(func.distinct(Referral.referred_user_id)).desc())
         )
-        .outerjoin(Payment, Payment.user_id == Referral.referred_user_id)
-        .where(Referral.joined_at >= start)
-        .group_by(Referral.code)
-        .order_by(func.count(func.distinct(Referral.referred_user_id)).desc())
-    )).all()
+    ).all()
 
     codes = {row.code for row in rows} | set(metadata)
     indexed = {row.code: row for row in rows}
@@ -85,23 +122,22 @@ async def campaigns(
         revenue = float(row.revenue if row else 0)
         meta = metadata.get(code, {})
         cost = float(meta.get("cost_rub", 0) or 0)
-        cac = round(cost / registrations, 2) if registrations else None
-        cpa = round(cost / buyers, 2) if buyers else None
-        roi = round((revenue - cost) / cost * 100, 2) if cost else None
-        items.append({
-            "code": code,
-            "title": meta.get("title") or code,
-            "platform": meta.get("platform") or "",
-            "note": meta.get("note") or "",
-            "cost_rub": cost,
-            "registrations": registrations,
-            "buyers": buyers,
-            "revenue": round(revenue, 2),
-            "conversion": round(buyers / registrations * 100, 2) if registrations else 0,
-            "cac": cac,
-            "cpa": cpa,
-            "roi": roi,
-        })
+        items.append(
+            {
+                "code": code,
+                "title": meta.get("title") or code,
+                "platform": meta.get("platform") or "",
+                "note": meta.get("note") or "",
+                "cost_rub": cost,
+                "registrations": registrations,
+                "buyers": buyers,
+                "revenue": round(revenue, 2),
+                "conversion": round(buyers / registrations * 100, 2) if registrations else 0,
+                "cac": round(cost / registrations, 2) if registrations else None,
+                "cpa": round(cost / buyers, 2) if buyers else None,
+                "roi": round((revenue - cost) / cost * 100, 2) if cost else None,
+            }
+        )
     return {"days": days, "items": items}
 
 
@@ -113,6 +149,8 @@ async def update_campaign(
     settings: Settings = Depends(get_settings),
 ) -> dict:
     normalized = code.strip()[:64]
+    if not normalized:
+        raise HTTPException(status_code=422, detail="Campaign code is required")
     payload = {**body.model_dump(), "updated_at": _now().isoformat(), "updated_by": admin}
     client = _redis(settings)
     await client.hset(CAMPAIGNS_KEY, normalized, json.dumps(payload, ensure_ascii=False))
@@ -151,9 +189,23 @@ async def filtered_users(
     elif source == "organic":
         conditions.append(~exists(select(Referral.id).where(Referral.referred_user_id == User.id)))
     if business == "connected":
-        conditions.append(exists(select(BusinessConnection.id).where(BusinessConnection.owner_user_id == User.id, BusinessConnection.is_active.is_(True))))
+        conditions.append(
+            exists(
+                select(BusinessConnection.id).where(
+                    BusinessConnection.owner_user_id == User.id,
+                    BusinessConnection.is_active.is_(True),
+                )
+            )
+        )
     elif business == "disconnected":
-        conditions.append(~exists(select(BusinessConnection.id).where(BusinessConnection.owner_user_id == User.id, BusinessConnection.is_active.is_(True)))
+        conditions.append(
+            ~exists(
+                select(BusinessConnection.id).where(
+                    BusinessConnection.owner_user_id == User.id,
+                    BusinessConnection.is_active.is_(True),
+                )
+            )
+        )
     if payment == "paid":
         conditions.append(exists(select(Payment.id).where(Payment.user_id == User.id, Payment.status == "paid")))
     elif payment == "never":
@@ -161,8 +213,126 @@ async def filtered_users(
 
     base = select(User).where(and_(*conditions)) if conditions else select(User)
     total = int(await session.scalar(select(func.count()).select_from(base.subquery())) or 0)
-    users = list((await session.scalars(base.order_by(User.registered_at.desc()).offset(offset).limit(limit))).all())
-    return {"total": total, "limit": limit, "offset": offset, "items": [serialize_user(user) for user in users]}
+    users = list(
+        (
+            await session.scalars(
+                base.order_by(User.registered_at.desc()).offset(offset).limit(limit)
+            )
+        ).all()
+    )
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "items": [serialize_user(user) for user in users],
+    }
+
+
+@router.get("/users/{user_id}/support")
+async def user_support(
+    user_id: int,
+    _: AdminAuth,
+    session: Session,
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    user = await session.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    meta = await _read_user_meta(settings, user_id)
+    payments = int(
+        await session.scalar(
+            select(func.count(Payment.id)).where(Payment.user_id == user_id, Payment.status == "paid")
+        )
+        or 0
+    )
+    paid_total = float(
+        await session.scalar(
+            select(func.coalesce(func.sum(Payment.amount), 0)).where(
+                Payment.user_id == user_id, Payment.status == "paid"
+            )
+        )
+        or 0
+    )
+    business_connected = bool(
+        await session.scalar(
+            select(BusinessConnection.id).where(
+                BusinessConnection.owner_user_id == user_id,
+                BusinessConnection.is_active.is_(True),
+            ).limit(1)
+        )
+    )
+    return {
+        "user": serialize_user(user),
+        "meta": meta,
+        "access_disabled": user.is_access_disabled,
+        "payments_count": payments,
+        "paid_total": paid_total,
+        "business_connected": business_connected,
+    }
+
+
+@router.patch("/users/{user_id}/support")
+async def update_user_support(
+    user_id: int,
+    body: UserMetaPatch,
+    admin: AdminAuth,
+    session: Session,
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    user = await session.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    tags = []
+    for raw in body.tags:
+        tag = raw.strip()[:40]
+        if tag and tag.lower() not in {item.lower() for item in tags}:
+            tags.append(tag)
+    payload = {
+        "note": body.note.strip(),
+        "tags": tags[:20],
+        "updated_at": _now().isoformat(),
+        "updated_by": admin,
+    }
+    client = _redis(settings)
+    await client.hset(USER_META_KEY, str(user_id), json.dumps(payload, ensure_ascii=False))
+    await client.aclose()
+    await _audit(settings, admin, "user.support.updated", {"user_id": user_id, "tags": tags})
+    return {"ok": True, "meta": payload}
+
+
+@router.patch("/users/{user_id}/access")
+async def update_user_access(
+    user_id: int,
+    body: UserAccessPatch,
+    admin: AdminAuth,
+    session: Session,
+    settings: Settings = Depends(get_settings),
+) -> dict:
+    user = await session.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.is_access_disabled = body.disabled
+    if body.disabled:
+        user.subscription_status = SubscriptionStatus.disabled
+    elif user.vip_ends_at and user.vip_ends_at > _now():
+        user.subscription_status = SubscriptionStatus.vip
+    elif user.trial_ends_at > _now():
+        user.subscription_status = SubscriptionStatus.trial
+    else:
+        user.subscription_status = SubscriptionStatus.expired
+    await session.commit()
+    await _audit(
+        settings,
+        admin,
+        "user.access.updated",
+        {"user_id": user_id, "disabled": body.disabled, "reason": body.reason.strip()},
+    )
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "disabled": user.is_access_disabled,
+        "subscription_status": user.subscription_status.value,
+    }
 
 
 def _csv_response(filename: str, rows: list[list[object]]) -> StreamingResponse:
@@ -170,31 +340,70 @@ def _csv_response(filename: str, rows: list[list[object]]) -> StreamingResponse:
     writer = csv.writer(stream, delimiter=";")
     writer.writerows(rows)
     data = "\ufeff" + stream.getvalue()
-    return StreamingResponse(iter([data.encode("utf-8")]), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+    return StreamingResponse(
+        iter([data.encode("utf-8")]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/exports/users.csv")
-async def export_users(admin: AdminAuth, session: Session, settings: Settings = Depends(get_settings)):
+async def export_users(
+    admin: AdminAuth,
+    session: Session,
+    settings: Settings = Depends(get_settings),
+):
     users = list((await session.scalars(select(User).order_by(User.registered_at.desc()))).all())
-    rows: list[list[object]] = [["Telegram ID", "Username", "Имя", "Статус", "Регистрация", "Последняя активность", "Trial до", "VIP до", "Заблокировал бота"]]
+    rows: list[list[object]] = [[
+        "Telegram ID", "Username", "Имя", "Статус", "Регистрация", "Последняя активность",
+        "Trial до", "VIP до", "Доступ отключён", "Заблокировал бота",
+    ]]
     for user in users:
         rows.append([
-            user.telegram_id, user.username or "", " ".join(filter(None, [user.first_name, user.last_name])),
-            user.subscription_status.value, user.registered_at.isoformat(), user.last_seen_at.isoformat(),
-            user.trial_ends_at.isoformat(), user.vip_ends_at.isoformat() if user.vip_ends_at else "", bool(user.blocked_bot_at),
+            user.telegram_id,
+            user.username or "",
+            " ".join(filter(None, [user.first_name, user.last_name])),
+            user.subscription_status.value,
+            user.registered_at.isoformat(),
+            user.last_seen_at.isoformat(),
+            user.trial_ends_at.isoformat(),
+            user.vip_ends_at.isoformat() if user.vip_ends_at else "",
+            user.is_access_disabled,
+            bool(user.blocked_bot_at),
         ])
     await _audit(settings, admin, "export.users", {"count": len(users)})
     return _csv_response("phantom-users.csv", rows)
 
 
 @router.get("/exports/payments.csv")
-async def export_payments(admin: AdminAuth, session: Session, settings: Settings = Depends(get_settings)):
-    records = (await session.execute(select(Payment, User).join(User, User.id == Payment.user_id).order_by(Payment.created_at.desc()))).all()
-    rows: list[list[object]] = [["ID", "Telegram ID", "Username", "Сумма", "Валюта", "Статус", "Провайдер", "Повторный", "Создан", "Оплачен", "Возврат"]]
+async def export_payments(
+    admin: AdminAuth,
+    session: Session,
+    settings: Settings = Depends(get_settings),
+):
+    records = (
+        await session.execute(
+            select(Payment, User)
+            .join(User, User.id == Payment.user_id)
+            .order_by(Payment.created_at.desc())
+        )
+    ).all()
+    rows: list[list[object]] = [[
+        "ID", "Telegram ID", "Username", "Сумма", "Валюта", "Статус", "Провайдер",
+        "Повторный", "Создан", "Оплачен", "Возврат",
+    ]]
     for payment, user in records:
         rows.append([
-            payment.id, user.telegram_id, user.username or "", str(payment.amount), payment.currency, payment.status,
-            payment.provider, payment.recurring, payment.created_at.isoformat(), payment.paid_at.isoformat() if payment.paid_at else "",
+            payment.id,
+            user.telegram_id,
+            user.username or "",
+            str(payment.amount),
+            payment.currency,
+            payment.status,
+            payment.provider,
+            payment.recurring,
+            payment.created_at.isoformat(),
+            payment.paid_at.isoformat() if payment.paid_at else "",
             payment.refunded_at.isoformat() if payment.refunded_at else "",
         ])
     await _audit(settings, admin, "export.payments", {"count": len(records)})
@@ -202,8 +411,18 @@ async def export_payments(admin: AdminAuth, session: Session, settings: Settings
 
 
 @router.get("/audit")
-async def audit_log(_: AdminAuth, settings: Settings = Depends(get_settings), limit: int = Query(100, ge=1, le=500)) -> dict:
+async def audit_log(
+    _: AdminAuth,
+    settings: Settings = Depends(get_settings),
+    limit: int = Query(100, ge=1, le=500),
+) -> dict:
     client = _redis(settings)
     raw = await client.lrange(AUDIT_KEY, 0, limit - 1)
     await client.aclose()
-    return {"items": [json.loads(item) for item in raw]}
+    items = []
+    for item in raw:
+        try:
+            items.append(json.loads(item))
+        except json.JSONDecodeError:
+            continue
+    return {"items": items}
