@@ -23,6 +23,8 @@ from app.api.routes.user import router as user_router
 from app.api.routes.user_intelligence import router as user_intelligence_router
 from app.api.routes.webhook import router as webhook_router
 from app.api.routes.webhook_compat import router as webhook_compat_router
+from app.bot.setup import dispatcher
+from app.bot.user_intelligence import router as user_intelligence_bot_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import engine
@@ -30,6 +32,7 @@ from app.services.funnel_scheduler import funnel_scheduler_loop
 
 settings = get_settings()
 configure_logging()
+dispatcher.include_router(user_intelligence_bot_router)
 
 
 @asynccontextmanager
