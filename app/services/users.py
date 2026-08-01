@@ -1,10 +1,17 @@
 import secrets
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Referral, SubscriptionStatus, User, UserSettings
+from app.db.models import (
+    BusinessConnection,
+    Message,
+    Referral,
+    SubscriptionStatus,
+    User,
+    UserSettings,
+)
 from app.services.access import get_monetization_settings
 
 
@@ -60,6 +67,11 @@ def referral_code(user: User) -> str:
 
 
 async def apply_referral(session: AsyncSession, *, referred: User, code: str) -> bool:
+    """Attach a referral without granting the bonus prematurely.
+
+    The referrer receives the bonus only after the referred user connects
+    Telegram Business and at least one business message is archived.
+    """
     if referred.referrer_user_id is not None:
         return False
     referrer = None
@@ -73,15 +85,51 @@ async def apply_referral(session: AsyncSession, *, referred: User, code: str) ->
     existing = await session.scalar(select(Referral).where(Referral.referred_user_id == referred.id))
     if existing:
         return False
-    config = await get_monetization_settings(session)
     now = datetime.now(UTC)
     referred.referrer_user_id = referrer.id
     session.add(Referral(referrer_user_id=referrer.id, referred_user_id=referred.id, code=code, joined_at=now))
-    if referrer.referral_bonus_granted_at is None:
-        referrer.trial_ends_at = max(now, referrer.trial_ends_at) + timedelta(days=config.referral_bonus_days)
-        referrer.referral_bonus_granted_at = now
-        referrer.subscription_status = SubscriptionStatus.referral
     return True
+
+
+async def qualify_referral(session: AsyncSession, *, referred_user_id: int) -> User | None:
+    """Grant one referral bonus after genuine Telegram Business usage."""
+    referral = await session.scalar(
+        select(Referral)
+        .where(Referral.referred_user_id == referred_user_id)
+        .with_for_update()
+    )
+    if referral is None or referral.bonus_granted_at is not None:
+        return None
+
+    active_business = await session.scalar(
+        select(func.count(BusinessConnection.id)).where(
+            BusinessConnection.owner_user_id == referred_user_id,
+            BusinessConnection.is_active.is_(True),
+        )
+    )
+    if not active_business:
+        return None
+
+    archived_messages = await session.scalar(
+        select(func.count(Message.id))
+        .join(BusinessConnection, BusinessConnection.id == Message.business_connection_id)
+        .where(BusinessConnection.owner_user_id == referred_user_id)
+    )
+    if not archived_messages:
+        return None
+
+    referrer = await session.get(User, referral.referrer_user_id, with_for_update=True)
+    if referrer is None or referrer.referral_bonus_granted_at is not None:
+        return None
+
+    config = await get_monetization_settings(session)
+    now = datetime.now(UTC)
+    referrer.trial_ends_at = max(now, referrer.trial_ends_at) + timedelta(days=config.referral_bonus_days)
+    referrer.referral_bonus_granted_at = now
+    referrer.subscription_status = SubscriptionStatus.referral
+    referral.bonus_granted_at = now
+    await session.flush()
+    return referrer
 
 
 def new_idempotency_key(prefix: str) -> str:
