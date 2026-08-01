@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import structlog
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from redis.asyncio import Redis
 from sqlalchemy import select, update
 
@@ -14,6 +14,8 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.models import Job, Media, Message, User
 from app.db.session import SessionLocal
+from app.services.access import has_access
+from app.services.access_funnel import get_funnel_config
 from app.services.broadcasts import send_broadcast
 from app.services.media import download_telegram_file, safe_media_path
 from app.services.queue import QUEUE_KEY
@@ -22,6 +24,14 @@ settings = get_settings()
 logger = structlog.get_logger()
 QUEUE_MARKER_PREFIX = "dialog_spy:job_enqueued:"
 STALE_RUNNING_SECONDS = 300
+
+
+def payment_markup(url: str, text: str) -> InlineKeyboardMarkup | None:
+    if not url.startswith("https://"):
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=text, url=url)]]
+    )
 
 
 async def _ensure_media_downloaded(media_id: int) -> Media:
@@ -55,6 +65,22 @@ async def _ensure_media_downloaded(media_id: int) -> Media:
 
 async def _deliver_protected_media(job: Job) -> None:
     media_id = int(job.payload["media_id"])
+    async with SessionLocal() as session:
+        user = await session.get(User, int(job.payload["owner_user_id"]))
+        if not user:
+            raise RuntimeError("Owner not found")
+        funnel = await get_funnel_config()
+        if funnel.enabled and funnel.redact_expired_notifications and not has_access(user):
+            await bot.send_message(
+                user.telegram_id,
+                "🔐 <b>Получено скрытое медиа</b>\n\n"
+                f"💬 <b>Диалог:</b> {funnel.redacted_actor}\n"
+                f"📎 <b>Содержимое:</b> {funnel.redacted_content}\n\n"
+                "Оформите доступ, чтобы получить сохранённый файл.",
+                reply_markup=payment_markup(funnel.payment_url, funnel.payment_button_text),
+            )
+            return
+
     media = await _ensure_media_downloaded(media_id)
     async with SessionLocal() as session:
         user = await session.get(User, int(job.payload["owner_user_id"]))
@@ -91,7 +117,15 @@ async def _deliver_protected_media(job: Job) -> None:
 
 async def handle_job(job: Job) -> None:
     if job.kind == "send_text":
-        await bot.send_message(job.payload["telegram_id"], job.payload["text"])
+        reply_markup = None
+        raw_markup = job.payload.get("reply_markup")
+        if raw_markup:
+            reply_markup = InlineKeyboardMarkup.model_validate(raw_markup)
+        await bot.send_message(
+            job.payload["telegram_id"],
+            job.payload["text"],
+            reply_markup=reply_markup,
+        )
         return
     if job.kind == "broadcast_send":
         await send_broadcast(bot, job.payload)
