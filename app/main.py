@@ -3,6 +3,7 @@ import uuid
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -23,6 +24,8 @@ from app.api.routes.user import router as user_router
 from app.api.routes.user_intelligence import router as user_intelligence_router
 from app.api.routes.webhook import router as webhook_router
 from app.api.routes.webhook_compat import router as webhook_compat_router
+from app.bot import access_funnel as access_funnel_module
+from app.bot import admin_console as admin_console_module
 from app.bot.setup import dispatcher
 from app.bot.user_intelligence import router as user_intelligence_bot_router
 from app.core.config import get_settings
@@ -33,6 +36,21 @@ from app.services.funnel_scheduler import funnel_scheduler_loop
 settings = get_settings()
 configure_logging()
 dispatcher.include_router(user_intelligence_bot_router)
+
+_original_user_menu = admin_console_module.user_menu
+
+
+def _user_menu_with_stats(admin: bool) -> InlineKeyboardMarkup:
+    original = _original_user_menu(admin)
+    rows = [list(row) for row in original.inline_keyboard]
+    stats_row = [InlineKeyboardButton(text="📊 Статистика", callback_data="intel:summary")]
+    insert_at = 1 if rows else 0
+    rows.insert(insert_at, stats_row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+admin_console_module.user_menu = _user_menu_with_stats
+access_funnel_module.user_menu = _user_menu_with_stats
 
 
 @asynccontextmanager
