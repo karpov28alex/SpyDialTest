@@ -22,6 +22,9 @@ class FunnelPatch(BaseModel):
     subscription_success_text: str | None = Field(default=None, max_length=4000)
     referral_required: bool | None = None
     referral_text: str | None = Field(default=None, max_length=8000)
+    referral_started_text: str | None = Field(default=None, max_length=8000)
+    referral_bonus_success_text: str | None = Field(default=None, max_length=8000)
+    referral_share_text: str | None = Field(default=None, max_length=8000)
     payment_required_text: str | None = Field(default=None, max_length=8000)
     payment_button_text: str | None = Field(default=None, max_length=255)
     payment_url: str | None = Field(default=None, max_length=1024)
@@ -30,19 +33,11 @@ class FunnelPatch(BaseModel):
     redacted_content: str | None = Field(default=None, max_length=2000)
 
     @field_validator(
-        "channel_id",
-        "channel_url",
-        "channel_title",
-        "subscription_text",
-        "subscription_error_text",
-        "subscription_success_text",
-        "referral_text",
-        "payment_required_text",
-        "payment_button_text",
-        "payment_url",
-        "redacted_actor",
-        "redacted_content",
-        mode="before",
+        "channel_id", "channel_url", "channel_title", "subscription_text",
+        "subscription_error_text", "subscription_success_text", "referral_text",
+        "referral_started_text", "referral_bonus_success_text", "referral_share_text",
+        "payment_required_text", "payment_button_text", "payment_url",
+        "redacted_actor", "redacted_content", mode="before",
     )
     @classmethod
     def normalize_strings(cls, value):
