@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import desc, func, or_, select
+from sqlalchemy import desc, func, select
 
 from app.api.routes.admin import AdminAuth, Session, media_url
 from app.core.config import Settings, get_settings
@@ -12,6 +12,37 @@ def _peer_condition(dialog: Dialog):
     if dialog.peer_telegram_id is not None:
         return Dialog.peer_telegram_id == dialog.peer_telegram_id
     return Dialog.telegram_chat_id == dialog.telegram_chat_id
+
+
+def _clean_username(value: str | None) -> str | None:
+    value = (value or "").strip().lstrip("@")
+    return value or None
+
+
+def _display_dialog(group: list[Dialog]) -> tuple[Dialog, str, str | None]:
+    """Choose the richest peer identity and prefer @username in the admin UI."""
+    latest = max(
+        group,
+        key=lambda row: (
+            row.last_message_at is not None,
+            row.last_message_at,
+            row.id,
+        ),
+    )
+    username_row = next(
+        (row for row in group if _clean_username(row.peer_username)),
+        None,
+    )
+    name_row = next(
+        (row for row in group if (row.peer_name or "").strip()),
+        None,
+    )
+    identity = username_row or name_row or latest
+    username = _clean_username(identity.peer_username)
+    peer_id = identity.peer_telegram_id or latest.peer_telegram_id or latest.telegram_chat_id
+    plain_name = (identity.peer_name or "").strip()
+    display_name = f"@{username}" if username else (plain_name or f"ID {peer_id}")
+    return latest, display_name, username
 
 
 @router.get("/users/{user_id}/dialogs")
@@ -33,16 +64,17 @@ async def user_dialogs(user_id: int, _: AdminAuth, session: Session) -> dict:
         count = int(await session.scalar(
             select(func.count(Message.id)).where(Message.dialog_id.in_(dialog_ids))
         ) or 0)
-        latest = max(group, key=lambda row: (row.last_message_at is not None, row.last_message_at, row.id))
-        display = next((row for row in group if row.peer_name or row.peer_username), latest)
+        latest, display_name, username = _display_dialog(group)
+        avatar_row = next((row for row in group if row.avatar), latest)
         items.append({
             "id": latest.id,
             "dialog_ids": dialog_ids,
-            "name": display.peer_name,
-            "username": display.peer_username,
+            "name": display_name,
+            "display_name": display_name,
+            "username": username,
             "telegram_chat_id": latest.telegram_chat_id,
             "peer_telegram_id": latest.peer_telegram_id,
-            "avatar": display.avatar or latest.avatar,
+            "avatar": avatar_row.avatar or latest.avatar,
             "last_message_at": latest.last_message_at.isoformat() if latest.last_message_at else None,
             "messages_count": count,
             "is_hidden": all(row.is_hidden for row in group),
@@ -70,7 +102,9 @@ async def dialog_messages(
             _peer_condition(dialog),
         )
     )).all())
-    dialog_ids = [row.id for row in matching_dialogs] or [dialog.id]
+    if not matching_dialogs:
+        matching_dialogs = [dialog]
+    dialog_ids = [row.id for row in matching_dialogs]
     rows = list((await session.scalars(
         select(Message)
         .where(Message.dialog_id.in_(dialog_ids))
@@ -115,14 +149,18 @@ async def dialog_messages(
             } for item in media],
         })
 
-    display = next((row for row in matching_dialogs if row.peer_name or row.peer_username), dialog)
+    latest, display_name, username = _display_dialog(matching_dialogs)
+    avatar_row = next((row for row in matching_dialogs if row.avatar), latest)
     return {
         "dialog": {
             "id": dialog.id,
             "dialog_ids": dialog_ids,
-            "name": display.peer_name,
-            "username": display.peer_username,
-            "avatar": display.avatar or dialog.avatar,
+            "name": display_name,
+            "display_name": display_name,
+            "username": username,
+            "peer_telegram_id": latest.peer_telegram_id,
+            "telegram_chat_id": latest.telegram_chat_id,
+            "avatar": avatar_row.avatar or latest.avatar,
         },
         "items": result,
     }
