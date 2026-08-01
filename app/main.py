@@ -14,6 +14,7 @@ from app.api.routes.admin_dialogs import router as admin_dialogs_router
 from app.api.routes.admin_explorer import router as admin_explorer_router
 from app.api.routes.admin_growth import router as admin_growth_router
 from app.api.routes.admin_monetization import router as admin_monetization_router
+from app.api.routes.admin_user360 import router as admin_user360_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.avatar import router as avatar_router
 from app.api.routes.user import router as user_router
@@ -51,6 +52,7 @@ app.include_router(admin_explorer_router)
 app.include_router(admin_monetization_router)
 app.include_router(admin_analytics_router)
 app.include_router(admin_growth_router)
+app.include_router(admin_user360_router)
 app.include_router(webhook_router)
 app.include_router(webhook_compat_router)
 
@@ -128,12 +130,12 @@ async def mini_app_asset(asset_path: str):
 
 @app.get("/admin", include_in_schema=False)
 async def admin_app() -> FileResponse:
-    return FileResponse("app/static/admin/index.html", headers={"Cache-Control": "no-store"})
+    return FileResponse("app/static/admin/unified.html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/admin/{asset_path:path}", include_in_schema=False)
 async def admin_asset(asset_path: str):
     path = Path("app/static/admin") / asset_path
     if not path.is_file():
-        return FileResponse("app/static/admin/index.html", headers={"Cache-Control": "no-store"})
+        return FileResponse("app/static/admin/unified.html", headers={"Cache-Control": "no-store"})
     return FileResponse(path, headers={"Cache-Control": "no-store"})
