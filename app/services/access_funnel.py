@@ -20,6 +20,7 @@ CHANNEL_VERIFIED_PREFIX = "phantom:access_funnel:channel_verified:"
 @dataclass(slots=True)
 class FunnelConfig:
     enabled: bool = False
+    # Подписка на информационный канал является обязательным этапом.
     channel_required: bool = True
     channel_id: str = ""
     channel_url: str = ""
@@ -68,6 +69,8 @@ async def get_funnel_config(redis: Redis | None = None) -> FunnelConfig:
                 values[key] = raw.lower() in {"1", "true", "yes", "on"}
             else:
                 values[key] = raw
+        # Канал нельзя отключить настройкой: это обязательный шаг воронки.
+        values["channel_required"] = True
         return FunnelConfig(**values)
     finally:
         if own:
@@ -81,12 +84,13 @@ async def save_funnel_config(values: dict[str, Any], redis: Redis | None = None)
         current = asdict(await get_funnel_config(redis))
         allowed = set(current)
         for key, value in values.items():
-            if key not in allowed or value is None:
+            if key not in allowed or value is None or key == "channel_required":
                 continue
             if isinstance(current[key], bool):
                 current[key] = bool(value)
             else:
                 current[key] = str(value).strip()
+        current["channel_required"] = True
         await redis.hset(
             CONFIG_KEY,
             mapping={
@@ -101,6 +105,7 @@ async def save_funnel_config(values: dict[str, Any], redis: Redis | None = None)
 
 
 async def channel_verified(user_id: int, redis: Redis | None = None) -> bool:
+    """Последний успешный результат проверки. Не используется как вечный пропуск."""
     own = redis is None
     redis = redis or redis_client()
     try:
@@ -117,7 +122,18 @@ async def mark_channel_verified(user_id: int, redis: Redis | None = None) -> Non
         await redis.set(
             f"{CHANNEL_VERIFIED_PREFIX}{user_id}",
             datetime.now(UTC).isoformat(),
+            ex=900,
         )
+    finally:
+        if own:
+            await redis.aclose()
+
+
+async def clear_channel_verified(user_id: int, redis: Redis | None = None) -> None:
+    own = redis is None
+    redis = redis or redis_client()
+    try:
+        await redis.delete(f"{CHANNEL_VERIFIED_PREFIX}{user_id}")
     finally:
         if own:
             await redis.aclose()
@@ -145,15 +161,20 @@ async def check_channel_membership(bot: Bot, *, user_id: int, channel_id: str) -
 
 
 async def channel_gate_passed(bot: Bot, *, user_id: int, config: FunnelConfig | None = None) -> bool:
+    """Всегда проверяет фактическое членство через Telegram.
+
+    Redis хранит только недолгий индикатор успешной проверки и не является
+    пропуском, поэтому выход из канала сразу закрывает защищённые функции.
+    """
     config = config or await get_funnel_config()
-    if not config.enabled or not config.channel_required:
+    if not config.enabled:
         return True
-    if await channel_verified(user_id):
-        return True
-    if await check_channel_membership(bot, user_id=user_id, channel_id=config.channel_id):
+    ok = await check_channel_membership(bot, user_id=user_id, channel_id=config.channel_id)
+    if ok:
         await mark_channel_verified(user_id)
-        return True
-    return False
+    else:
+        await clear_channel_verified(user_id)
+    return ok
 
 
 def notification_is_redacted(user: User, config: FunnelConfig) -> bool:
