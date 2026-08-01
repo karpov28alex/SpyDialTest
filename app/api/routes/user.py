@@ -6,12 +6,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import desc, func, select
 
 from app.api.deps import CurrentUser, SessionDep
+from app.bot.setup import bot
 from app.core.config import Settings, get_settings
 from app.core.security import create_token, decode_token
 from app.db.models import BusinessConnection, Dialog, Media, Message, MessageVersion, User
 from app.db.session import get_session
 from app.services.access import access_state, get_monetization_settings, payment_plans
-from app.services.access_funnel import channel_verified, get_funnel_config
+from app.services.access_funnel import channel_gate_passed, get_funnel_config
 from app.services.media import safe_media_path
 from app.services.users import referral_code
 
@@ -23,17 +24,23 @@ def avatar_url(user_id: int, dialog_id: int, settings: Settings) -> str:
     return f"/api/avatar/{token}"
 
 
-async def require_archive_access(user: User, session: SessionDep) -> None:
+async def require_channel_access(user: User) -> None:
     funnel = await get_funnel_config()
-    if funnel.enabled and funnel.channel_required and not await channel_verified(user.telegram_id):
+    if funnel.enabled and not await channel_gate_passed(bot, user_id=user.telegram_id, config=funnel):
         raise HTTPException(
             status_code=403,
             detail={
                 "code": "CHANNEL_SUBSCRIPTION_REQUIRED",
                 "message": funnel.subscription_text,
                 "channel_url": funnel.channel_url,
+                "channel_title": funnel.channel_title,
             },
         )
+
+
+async def require_archive_access(user: User, session: SessionDep) -> None:
+    await require_channel_access(user)
+    funnel = await get_funnel_config()
     access = await access_state(session, user)
     if funnel.enabled and not access.active:
         raise HTTPException(
@@ -50,11 +57,16 @@ async def require_archive_access(user: User, session: SessionDep) -> None:
 
 @router.get("/me")
 async def me(user: CurrentUser, session: SessionDep, settings: Settings = Depends(get_settings)) -> dict:
-    connection = await session.scalar(select(BusinessConnection).where(BusinessConnection.owner_user_id == user.id, BusinessConnection.is_active.is_(True)))
+    connection = await session.scalar(
+        select(BusinessConnection).where(
+            BusinessConnection.owner_user_id == user.id,
+            BusinessConnection.is_active.is_(True),
+        )
+    )
     config = await get_monetization_settings(session)
     funnel = await get_funnel_config()
     access = await access_state(session, user)
-    verified = await channel_verified(user.telegram_id)
+    verified = await channel_gate_passed(bot, user_id=user.telegram_id, config=funnel) if funnel.enabled else True
     referral_link = f"https://t.me/{settings.telegram_bot_username}?start=ref_{referral_code(user)}"
     return {
         "id": user.id,
@@ -71,7 +83,7 @@ async def me(user: CurrentUser, session: SessionDep, settings: Settings = Depend
         },
         "funnel": {
             "enabled": funnel.enabled,
-            "channel_required": funnel.channel_required,
+            "channel_required": True,
             "channel_verified": verified,
             "channel_title": funnel.channel_title,
             "channel_url": funnel.channel_url,
@@ -97,6 +109,7 @@ async def me(user: CurrentUser, session: SessionDep, settings: Settings = Depend
 
 @router.get("/subscription")
 async def subscription(user: CurrentUser, session: SessionDep, settings: Settings = Depends(get_settings)) -> dict:
+    await require_channel_access(user)
     config = await get_monetization_settings(session)
     funnel = await get_funnel_config()
     access = await access_state(session, user)
@@ -112,9 +125,19 @@ async def subscription(user: CurrentUser, session: SessionDep, settings: Setting
 
 
 @router.get("/dialogs")
-async def dialogs(user: CurrentUser, session: SessionDep, limit: int = Query(30, ge=1, le=100), cursor: int | None = None) -> dict:
+async def dialogs(
+    user: CurrentUser,
+    session: SessionDep,
+    limit: int = Query(30, ge=1, le=100),
+    cursor: int | None = None,
+) -> dict:
     await require_archive_access(user, session)
-    stmt = select(Dialog).where(Dialog.owner_user_id == user.id).order_by(desc(Dialog.last_message_at), desc(Dialog.id)).limit(limit + 1)
+    stmt = (
+        select(Dialog)
+        .where(Dialog.owner_user_id == user.id)
+        .order_by(desc(Dialog.last_message_at), desc(Dialog.id))
+        .limit(limit + 1)
+    )
     if cursor:
         stmt = stmt.where(Dialog.id < cursor)
     rows = list((await session.scalars(stmt)).all())
@@ -123,23 +146,43 @@ async def dialogs(user: CurrentUser, session: SessionDep, limit: int = Query(30,
     settings = get_settings()
     items = []
     for row in rows:
-        last = await session.scalar(select(Message).where(Message.dialog_id == row.id).order_by(desc(Message.sent_at), desc(Message.id)).limit(1))
+        last = await session.scalar(
+            select(Message)
+            .where(Message.dialog_id == row.id)
+            .order_by(desc(Message.sent_at), desc(Message.id))
+            .limit(1)
+        )
         count = await session.scalar(select(func.count(Message.id)).where(Message.dialog_id == row.id))
-        items.append({
-            "id": row.id, "peer_name": row.peer_name, "peer_username": row.peer_username,
-            "avatar": avatar_url(user.id, row.id, settings) if row.peer_telegram_id else None,
-            "message_count": int(count or 0), "last_message_at": row.last_message_at,
-            "last_message_text": (last.text or last.caption) if last else None,
-            "last_message_deleted": bool(last and last.is_deleted), "last_message_edited": bool(last and last.edited_at),
-            "direction": last.direction if last else None, "is_hidden": row.is_hidden,
-        })
+        items.append(
+            {
+                "id": row.id,
+                "peer_name": row.peer_name,
+                "peer_username": row.peer_username,
+                "avatar": avatar_url(user.id, row.id, settings) if row.peer_telegram_id else None,
+                "message_count": int(count or 0),
+                "last_message_at": row.last_message_at,
+                "last_message_text": (last.text or last.caption) if last else None,
+                "last_message_deleted": bool(last and last.is_deleted),
+                "last_message_edited": bool(last and last.edited_at),
+                "direction": last.direction if last else None,
+                "is_hidden": row.is_hidden,
+            }
+        )
     return {"items": items, "next_cursor": next_cursor}
 
 
 @router.get("/dialogs/{dialog_id}")
-async def dialog_detail(dialog_id: int, user: CurrentUser, session: SessionDep, limit: int = Query(50, ge=1, le=100), before_id: int | None = None) -> dict:
+async def dialog_detail(
+    dialog_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+    limit: int = Query(50, ge=1, le=100),
+    before_id: int | None = None,
+) -> dict:
     await require_archive_access(user, session)
-    dialog = await session.scalar(select(Dialog).where(Dialog.id == dialog_id, Dialog.owner_user_id == user.id))
+    dialog = await session.scalar(
+        select(Dialog).where(Dialog.id == dialog_id, Dialog.owner_user_id == user.id)
+    )
     if not dialog:
         raise HTTPException(status_code=404, detail="Dialog not found")
     stmt = select(Message).where(Message.dialog_id == dialog.id).order_by(desc(Message.id)).limit(limit + 1)
@@ -149,36 +192,84 @@ async def dialog_detail(dialog_id: int, user: CurrentUser, session: SessionDep, 
     next_cursor = rows[-1].id if len(rows) > limit else None
     rows = rows[:limit]
     ids = [m.id for m in rows]
-    media_rows = list((await session.scalars(select(Media).where(Media.message_id.in_(ids or [-1])))).all())
-    version_rows = list((await session.scalars(select(MessageVersion).where(MessageVersion.message_id.in_(ids or [-1])).order_by(MessageVersion.message_id, MessageVersion.version_number))).all())
+    media_rows = list(
+        (await session.scalars(select(Media).where(Media.message_id.in_(ids or [-1])))).all()
+    )
+    version_rows = list(
+        (
+            await session.scalars(
+                select(MessageVersion)
+                .where(MessageVersion.message_id.in_(ids or [-1]))
+                .order_by(MessageVersion.message_id, MessageVersion.version_number)
+            )
+        ).all()
+    )
     media_by_message: dict[int, list[dict]] = {}
     versions_by_message: dict[int, list[dict]] = {}
     settings = get_settings()
     for item in media_rows:
         token = None
         if item.download_status == "downloaded" and item.storage_key:
-            token = create_token(f"{user.id}:{item.id}", "media_download", timedelta(seconds=settings.media_signing_ttl_seconds), settings)
-        media_by_message.setdefault(item.message_id, []).append({
-            "id": item.id, "type": item.media_type, "is_protected": item.is_protected,
-            "status": item.download_status, "mime_type": item.mime_type, "filename": item.filename,
-            "size": item.size, "url": f"/api/media/download/{token}" if token else None,
-        })
+            token = create_token(
+                f"{user.id}:{item.id}",
+                "media_download",
+                timedelta(seconds=settings.media_signing_ttl_seconds),
+                settings,
+            )
+        media_by_message.setdefault(item.message_id, []).append(
+            {
+                "id": item.id,
+                "type": item.media_type,
+                "is_protected": item.is_protected,
+                "status": item.download_status,
+                "mime_type": item.mime_type,
+                "filename": item.filename,
+                "size": item.size,
+                "url": f"/api/media/download/{token}" if token else None,
+            }
+        )
     for version in version_rows:
-        versions_by_message.setdefault(version.message_id, []).append({"version": version.version_number, "text": version.text, "caption": version.caption, "created_at": version.created_at})
+        versions_by_message.setdefault(version.message_id, []).append(
+            {
+                "version": version.version_number,
+                "text": version.text,
+                "caption": version.caption,
+                "created_at": version.created_at,
+            }
+        )
     return {
-        "dialog": {"id": dialog.id, "peer_name": dialog.peer_name, "peer_username": dialog.peer_username, "avatar": avatar_url(user.id, dialog.id, settings) if dialog.peer_telegram_id else None},
-        "messages": [{
-            "id": m.id, "direction": m.direction, "text": m.text, "caption": m.caption,
-            "sent_at": m.sent_at, "edited_at": m.edited_at, "deleted_at": m.deleted_at,
-            "is_deleted": m.is_deleted, "reply_to_message_id": m.reply_to_message_id,
-            "media": media_by_message.get(m.id, []), "versions": versions_by_message.get(m.id, []),
-        } for m in reversed(rows)],
+        "dialog": {
+            "id": dialog.id,
+            "peer_name": dialog.peer_name,
+            "peer_username": dialog.peer_username,
+            "avatar": avatar_url(user.id, dialog.id, settings) if dialog.peer_telegram_id else None,
+        },
+        "messages": [
+            {
+                "id": m.id,
+                "direction": m.direction,
+                "text": m.text,
+                "caption": m.caption,
+                "sent_at": m.sent_at,
+                "edited_at": m.edited_at,
+                "deleted_at": m.deleted_at,
+                "is_deleted": m.is_deleted,
+                "reply_to_message_id": m.reply_to_message_id,
+                "media": media_by_message.get(m.id, []),
+                "versions": versions_by_message.get(m.id, []),
+            }
+            for m in reversed(rows)
+        ],
         "next_cursor": next_cursor,
     }
 
 
 @router.get("/media/download/{token}", include_in_schema=False)
-async def download_media(token: str, session=Depends(get_session), settings: Settings = Depends(get_settings)):
+async def download_media(
+    token: str,
+    session=Depends(get_session),
+    settings: Settings = Depends(get_settings),
+):
     try:
         subject = decode_token(token, "media_download", settings)
         user_id_text, media_id_text = subject.split(":", 1)
@@ -189,7 +280,12 @@ async def download_media(token: str, session=Depends(get_session), settings: Set
     if not owner:
         raise HTTPException(status_code=404, detail="User not found")
     await require_archive_access(owner, session)
-    row = await session.execute(select(Media, Message, Dialog).join(Message, Message.id == Media.message_id).join(Dialog, Dialog.id == Message.dialog_id).where(Media.id == media_id, Dialog.owner_user_id == user_id))
+    row = await session.execute(
+        select(Media, Message, Dialog)
+        .join(Message, Message.id == Media.message_id)
+        .join(Dialog, Dialog.id == Message.dialog_id)
+        .where(Media.id == media_id, Dialog.owner_user_id == user_id)
+    )
     result = row.first()
     if not result:
         raise HTTPException(status_code=404, detail="Media not found")
@@ -199,7 +295,12 @@ async def download_media(token: str, session=Depends(get_session), settings: Set
     path = safe_media_path(settings, media.storage_key)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Media file missing")
-    return FileResponse(path, media_type=media.mime_type or "application/octet-stream", filename=media.filename or f"media-{media.id}", headers={"Cache-Control": "private, no-store"})
+    return FileResponse(
+        path,
+        media_type=media.mime_type or "application/octet-stream",
+        filename=media.filename or f"media-{media.id}",
+        headers={"Cache-Control": "private, no-store"},
+    )
 
 
 class DialogPatch(BaseModel):
@@ -210,7 +311,9 @@ class DialogPatch(BaseModel):
 @router.patch("/dialogs/{dialog_id}")
 async def patch_dialog(dialog_id: int, body: DialogPatch, user: CurrentUser, session: SessionDep) -> dict:
     await require_archive_access(user, session)
-    dialog = await session.scalar(select(Dialog).where(Dialog.id == dialog_id, Dialog.owner_user_id == user.id))
+    dialog = await session.scalar(
+        select(Dialog).where(Dialog.id == dialog_id, Dialog.owner_user_id == user.id)
+    )
     if not dialog:
         raise HTTPException(status_code=404, detail="Dialog not found")
     for key, value in body.model_dump(exclude_none=True).items():
@@ -222,14 +325,51 @@ async def patch_dialog(dialog_id: int, body: DialogPatch, user: CurrentUser, ses
 @router.get("/messages/{message_id}/versions")
 async def versions(message_id: int, user: CurrentUser, session: SessionDep) -> dict:
     await require_archive_access(user, session)
-    message = await session.scalar(select(Message).join(Dialog).where(Message.id == message_id, Dialog.owner_user_id == user.id))
+    message = await session.scalar(
+        select(Message).join(Dialog).where(Message.id == message_id, Dialog.owner_user_id == user.id)
+    )
     if not message:
         raise HTTPException(status_code=404, detail="Message not found")
-    rows = list((await session.scalars(select(MessageVersion).where(MessageVersion.message_id == message.id).order_by(MessageVersion.version_number))).all())
-    return {"items": [{"version": r.version_number, "text": r.text, "caption": r.caption, "created_at": r.created_at} for r in rows], "current": {"text": message.text, "caption": message.caption, "edited_at": message.edited_at}}
+    rows = list(
+        (
+            await session.scalars(
+                select(MessageVersion)
+                .where(MessageVersion.message_id == message.id)
+                .order_by(MessageVersion.version_number)
+            )
+        ).all()
+    )
+    return {
+        "items": [
+            {
+                "version": r.version_number,
+                "text": r.text,
+                "caption": r.caption,
+                "created_at": r.created_at,
+            }
+            for r in rows
+        ],
+        "current": {
+            "text": message.text,
+            "caption": message.caption,
+            "edited_at": message.edited_at,
+        },
+    }
 
 
-SETTINGS_FIELDS = ("notifications_enabled", "save_protected_media", "notify_edits", "notify_deletions", "notify_protected_media", "notify_connection", "hide_preview", "notify_emoji", "theme", "language", "timezone")
+SETTINGS_FIELDS = (
+    "notifications_enabled",
+    "save_protected_media",
+    "notify_edits",
+    "notify_deletions",
+    "notify_protected_media",
+    "notify_connection",
+    "hide_preview",
+    "notify_emoji",
+    "theme",
+    "language",
+    "timezone",
+)
 
 
 @router.get("/settings")
@@ -257,4 +397,7 @@ async def patch_settings(body: SettingsPatch, user: CurrentUser, session: Sessio
     for key, value in values.items():
         setattr(user.settings, key, value)
     await session.commit()
-    return {"ok": True, "settings": {key: getattr(user.settings, key) for key in SETTINGS_FIELDS}}
+    return {
+        "ok": True,
+        "settings": {key: getattr(user.settings, key) for key in SETTINGS_FIELDS},
+    }
