@@ -32,7 +32,7 @@ async def register_or_update_user(
     user = await session.scalar(select(User).where(User.telegram_id == telegram_id).with_for_update())
     created = user is None
     if user is None:
-        trial_pending = funnel.channel_required
+        trial_pending = funnel.enabled and funnel.channel_required
         trial_end = now if trial_pending else (
             now + timedelta(days=config.trial_days) if config.free_trial_enabled else now
         )
@@ -111,7 +111,6 @@ async def apply_referral(session: AsyncSession, *, referred: User, code: str) ->
 
 
 async def qualify_referral(session: AsyncSession, *, referred_user_id: int) -> User | None:
-    """Grant one bonus only after live channel verification and real Business use."""
     referral = await session.scalar(
         select(Referral).where(Referral.referred_user_id == referred_user_id).with_for_update()
     )
@@ -126,7 +125,13 @@ async def qualify_referral(session: AsyncSession, *, referred_user_id: int) -> U
     from app.services.access_funnel import channel_gate_passed
 
     funnel = await get_funnel_config()
-    if not await channel_gate_passed(bot, user_id=referred.telegram_id, config=funnel):
+    if not funnel.enabled or not funnel.referral_required:
+        return None
+    if funnel.channel_required and not await channel_gate_passed(
+        bot,
+        user_id=referred.telegram_id,
+        config=funnel,
+    ):
         return None
 
     active_business = await session.scalar(
@@ -162,8 +167,6 @@ async def qualify_referral(session: AsyncSession, *, referred_user_id: int) -> U
         referrer.telegram_id,
         funnel.referral_bonus_success_text.format(days=config.referral_bonus_days),
     )
-    # The webhook has a legacy generic notification when a user is returned.
-    # Returning None prevents a duplicate while the bonus is already committed.
     return None
 
 
