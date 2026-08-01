@@ -39,9 +39,10 @@ html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font:1
  <aside class="side">
   <div class="brand">PHANTOM<small>CONTROL CENTER</small></div>
   <nav class="nav">
-   <button class="active" data-frame="panel" data-src="/admin/index.html?v=0.8.6">Панель</button>
-   <button data-frame="support" data-src="/admin/support.html?v=0.8.6">Поддержка</button>
-   <button data-frame="user360" data-src="/admin/user360.html?v=0.8.6">User 360</button>
+   <button class="active" data-frame="panel" data-src="/admin/index.html?v=0.8.7">Панель</button>
+   <button data-frame="support" data-src="/admin/support.html?v=0.8.7">Поддержка</button>
+   <button data-frame="user360" data-src="/admin/user360.html?v=0.8.7">User 360</button>
+   <button data-frame="funnel" data-src="/admin/funnel.html?v=0.8.7">Доступ и воронка</button>
   </nav>
  </aside>
  <main class="main">
@@ -49,11 +50,12 @@ html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font:1
   <iframe id="panel" class="frame active" title="Панель"></iframe>
   <iframe id="support" class="frame" title="Поддержка"></iframe>
   <iframe id="user360" class="frame" title="User 360"></iframe>
+  <iframe id="funnel" class="frame" title="Доступ и воронка"></iframe>
  </main>
 </div>
 <script>
 const loading=document.getElementById('loading');
-const frames={panel:document.getElementById('panel'),support:document.getElementById('support'),user360:document.getElementById('user360')};
+const frames={panel:document.getElementById('panel'),support:document.getElementById('support'),user360:document.getElementById('user360'),funnel:document.getElementById('funnel')};
 const loaded=new Set();
 
 function getAdminToken(){
@@ -95,7 +97,7 @@ function normalizeChild(name,frame){
         @media(max-width:850px){.main{padding:12px!important}.top{align-items:flex-start!important}.top h1{font-size:28px!important}}
       `;
       if(!doc.querySelector('style[data-unified-admin]'))doc.head.appendChild(style);
-    }else if(name==='support'){
+    }else if(name==='support'||name==='funnel'){
       const back=doc.querySelector('a[href="/admin"]');
       if(back)back.style.display='none';
     }
