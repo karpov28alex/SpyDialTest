@@ -1,5 +1,6 @@
+import asyncio
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -24,6 +25,7 @@ from app.api.routes.webhook_compat import router as webhook_compat_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import engine
+from app.services.funnel_scheduler import funnel_scheduler_loop
 
 settings = get_settings()
 configure_logging()
@@ -32,8 +34,14 @@ configure_logging()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     settings.media_root.mkdir(parents=True, exist_ok=True)
-    yield
-    await engine.dispose()
+    funnel_task = asyncio.create_task(funnel_scheduler_loop(), name="access-funnel-scheduler")
+    try:
+        yield
+    finally:
+        funnel_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await funnel_task
+        await engine.dispose()
 
 
 app = FastAPI(title="Dialog Spy API", version=settings.app_version, lifespan=lifespan)
