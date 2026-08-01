@@ -13,6 +13,7 @@ from app.db.models import (
     UserSettings,
 )
 from app.services.access import get_monetization_settings
+from app.services.access_funnel import get_funnel_config
 
 
 async def register_or_update_user(
@@ -27,10 +28,21 @@ async def register_or_update_user(
 ) -> tuple[User, bool]:
     now = datetime.now(UTC)
     config = await get_monetization_settings(session)
+    funnel = await get_funnel_config()
     user = await session.scalar(select(User).where(User.telegram_id == telegram_id).with_for_update())
     created = user is None
     if user is None:
-        trial_end = now + timedelta(days=config.trial_days) if config.free_trial_enabled else now
+        # The trial must not run while the user has not confirmed the mandatory
+        # information-channel subscription. Equal timestamps mark a pending trial.
+        trial_pending = funnel.channel_required
+        trial_end = now if trial_pending else (
+            now + timedelta(days=config.trial_days) if config.free_trial_enabled else now
+        )
+        status = (
+            SubscriptionStatus.expired
+            if trial_pending or not config.free_trial_enabled
+            else SubscriptionStatus.trial
+        )
         user = User(
             telegram_id=telegram_id,
             username=username,
@@ -41,7 +53,7 @@ async def register_or_update_user(
             last_seen_at=now,
             trial_started_at=now,
             trial_ends_at=trial_end,
-            subscription_status=SubscriptionStatus.trial if config.free_trial_enabled else SubscriptionStatus.expired,
+            subscription_status=status,
         )
         user.settings = UserSettings(language=language_code or "ru")
         session.add(user)
@@ -57,8 +69,34 @@ async def register_or_update_user(
     return user, created
 
 
+async def activate_trial_after_channel(
+    session: AsyncSession,
+    *,
+    user: User,
+    now: datetime | None = None,
+) -> bool:
+    """Start the one-time free trial after channel membership is confirmed.
+
+    A pending trial is represented by trial_started_at == trial_ends_at. Existing
+    completed trials have a positive duration and therefore cannot be restarted.
+    """
+    now = now or datetime.now(UTC)
+    if user.trial_ends_at > user.trial_started_at:
+        return False
+    if user.referral_bonus_granted_at is not None or user.vip_ends_at:
+        return False
+    config = await get_monetization_settings(session)
+    user.trial_started_at = now
+    user.trial_ends_at = now + timedelta(days=config.trial_days) if config.free_trial_enabled else now
+    user.subscription_status = (
+        SubscriptionStatus.trial if config.free_trial_enabled else SubscriptionStatus.expired
+    )
+    await session.flush()
+    return config.free_trial_enabled
+
+
 def activate_business_trial(user: User, now: datetime | None = None) -> bool:
-    """Backward compatible hook. Trial is now assigned at registration when enabled."""
+    """Backward-compatible no-op; channel verification starts the trial."""
     return False
 
 
@@ -67,11 +105,7 @@ def referral_code(user: User) -> str:
 
 
 async def apply_referral(session: AsyncSession, *, referred: User, code: str) -> bool:
-    """Attach a referral without granting the bonus prematurely.
-
-    The referrer receives the bonus only after the referred user connects
-    Telegram Business and at least one business message is archived.
-    """
+    """Attach a referral without granting the bonus prematurely."""
     if referred.referrer_user_id is not None:
         return False
     referrer = None
@@ -87,12 +121,26 @@ async def apply_referral(session: AsyncSession, *, referred: User, code: str) ->
         return False
     now = datetime.now(UTC)
     referred.referrer_user_id = referrer.id
-    session.add(Referral(referrer_user_id=referrer.id, referred_user_id=referred.id, code=code, joined_at=now))
+    session.add(
+        Referral(
+            referrer_user_id=referrer.id,
+            referred_user_id=referred.id,
+            code=code,
+            joined_at=now,
+        )
+    )
     return True
 
 
-async def qualify_referral(session: AsyncSession, *, referred_user_id: int) -> User | None:
-    """Grant one referral bonus after genuine Telegram Business usage."""
+async def qualify_referral(
+    session: AsyncSession,
+    *,
+    referred_user_id: int,
+    channel_is_verified: bool,
+) -> User | None:
+    """Grant one bonus after verified channel membership and real Business use."""
+    if not channel_is_verified:
+        return None
     referral = await session.scalar(
         select(Referral)
         .where(Referral.referred_user_id == referred_user_id)
@@ -124,7 +172,9 @@ async def qualify_referral(session: AsyncSession, *, referred_user_id: int) -> U
 
     config = await get_monetization_settings(session)
     now = datetime.now(UTC)
-    referrer.trial_ends_at = max(now, referrer.trial_ends_at) + timedelta(days=config.referral_bonus_days)
+    referrer.trial_ends_at = max(now, referrer.trial_ends_at) + timedelta(
+        days=config.referral_bonus_days
+    )
     referrer.referral_bonus_granted_at = now
     referrer.subscription_status = SubscriptionStatus.referral
     referral.bonus_granted_at = now
