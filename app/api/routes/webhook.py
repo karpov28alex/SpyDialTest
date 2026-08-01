@@ -2,7 +2,7 @@ import traceback
 import uuid
 
 import structlog
-from aiogram.types import Update
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from fastapi import APIRouter, Header, HTTPException, Request
 from redis.asyncio import Redis
 from sqlalchemy import select
@@ -14,6 +14,7 @@ from app.business.events import format_delete_notification, format_edit_notifica
 from app.core.config import get_settings
 from app.db.models import BusinessConnection, Dialog, FailedUpdate, Media, Message, MessageVersion, User, UserSettings
 from app.db.session import SessionLocal
+from app.services.access_funnel import get_funnel_config, notification_is_redacted
 from app.services.queue import enqueue_job
 from app.services.telegram_updates import (
     claim_update,
@@ -24,6 +25,7 @@ from app.services.telegram_updates import (
     update_kind,
     upsert_business_connection,
 )
+from app.services.users import qualify_referral
 
 router = APIRouter(tags=["telegram"])
 settings = get_settings()
@@ -64,6 +66,38 @@ async def _preferences_for_connection(session, connection_id: str) -> UserSettin
     return await _ensure_preferences(session, user)
 
 
+def _paywall_markup(config) -> dict | None:
+    if not config.payment_url.startswith("https://"):
+        return None
+    markup = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text=config.payment_button_text, url=config.payment_url)
+        ]]
+    )
+    return markup.model_dump(mode="json", exclude_none=True)
+
+
+def _redacted_edit(config, message: Message) -> str:
+    return (
+        f"❗️ <b>{config.redacted_actor} изменил(а) сообщение</b>\n"
+        f"🕓 <b>Отправлено:</b> {message.sent_at.strftime('%d.%m.%Y · %H:%M:%S')}\n\n"
+        f"<b>Старое сообщение:</b>\n<blockquote>{config.redacted_content}</blockquote>\n\n"
+        f"<b>Новое сообщение:</b>\n<blockquote>{config.redacted_content}</blockquote>\n\n"
+        "Оформите доступ, чтобы увидеть полную историю изменения."
+    )
+
+
+def _redacted_delete(config, message: Message) -> str:
+    deleted_at = message.deleted_at or message.sent_at
+    return (
+        f"🗑 <b>{config.redacted_actor} удалил сообщение</b>\n"
+        f"🕓 <b>Отправлено:</b> {message.sent_at.strftime('%d.%m.%Y · %H:%M:%S')}\n"
+        f"🕓 <b>Удалено:</b> {deleted_at.strftime('%d.%m.%Y · %H:%M:%S')}\n\n"
+        f"<b>Сохранённое содержимое:</b>\n<blockquote>{config.redacted_content}</blockquote>\n\n"
+        "Оформите доступ, чтобы увидеть сохранённый текст."
+    )
+
+
 async def _queue_connection_notification(session, *, update_id: int, connection: BusinessConnection) -> None:
     user = await session.get(User, connection.owner_user_id)
     if not user:
@@ -72,7 +106,7 @@ async def _queue_connection_notification(session, *, update_id: int, connection:
     if not prefs.notifications_enabled or not prefs.notify_connection:
         return
     text = (
-        "✅ <b>Telegram Business подключён</b>\n\nDialog Spy начал сохранять поддерживаемые бизнес-диалоги."
+        "✅ <b>Telegram Business подключён</b>\n\nPhantom начал сохранять поддерживаемые бизнес-диалоги."
         if connection.is_active
         else "⚠️ <b>Telegram Business отключён</b>\n\nНовые сообщения больше не сохраняются. Архив остаётся доступным."
     )
@@ -101,51 +135,21 @@ async def _queue_media_downloads(session, message: Message) -> list[Media]:
 
 
 async def _persist_embedded_reply(session, event) -> None:
-    """Capture an embedded target only when Telegram never sent its original message.
-
-    Ordinary media messages are already present in the archive. Promoting an existing
-    message merely because it appears inside reply_to_message caused false protected
-    media notifications. A missing original is the reliable fallback used for
-    one-time/protected media that Telegram exposes only inside the explicit reply.
-    """
     target = event.reply_to_message
     if target is None or not event.business_connection_id:
         return
-    has_media = any((
-        target.photo,
-        target.video,
-        target.voice,
-        target.video_note,
-        target.document,
-        target.animation,
-        target.audio,
-        target.sticker,
-    ))
+    has_media = any((target.photo, target.video, target.voice, target.video_note, target.document, target.animation, target.audio, target.sticker))
     if not has_media:
         return
     prefs = await _preferences_for_connection(session, event.business_connection_id)
     if prefs is None or not prefs.save_protected_media:
         return
-    connection = await session.scalar(
-        select(BusinessConnection).where(
-            BusinessConnection.telegram_connection_id == event.business_connection_id
-        )
-    )
+    connection = await session.scalar(select(BusinessConnection).where(BusinessConnection.telegram_connection_id == event.business_connection_id))
     if connection is None:
         return
-    existing = await session.scalar(
-        select(Message).where(
-            Message.business_connection_id == connection.id,
-            Message.telegram_chat_id == target.chat.id,
-            Message.telegram_message_id == target.message_id,
-        )
-    )
+    existing = await session.scalar(select(Message).where(Message.business_connection_id == connection.id, Message.telegram_chat_id == target.chat.id, Message.telegram_message_id == target.message_id))
     if existing is not None:
-        logger.info(
-            "embedded_reply_target_already_archived",
-            message_id=existing.id,
-            telegram_message_id=target.message_id,
-        )
+        logger.info("embedded_reply_target_already_archived", message_id=existing.id, telegram_message_id=target.message_id)
         return
     target_with_connection = target.model_copy(update={"business_connection_id": event.business_connection_id})
     stored, created = await save_business_message(session, target_with_connection)
@@ -159,13 +163,7 @@ async def _persist_embedded_reply(session, event) -> None:
         media.is_protected = True
     await session.flush()
     await _queue_media_downloads(session, stored)
-    logger.info(
-        "embedded_protected_reply_archived",
-        message_id=stored.id,
-        telegram_message_id=stored.telegram_message_id,
-        media_count=len(media_rows),
-        reason="embedded_reply_missing_original",
-    )
+    logger.info("embedded_protected_reply_archived", message_id=stored.id, telegram_message_id=stored.telegram_message_id, media_count=len(media_rows), reason="embedded_reply_missing_original")
 
 
 async def _queue_protected_reply(session, reply_message: Message) -> None:
@@ -180,30 +178,16 @@ async def _queue_protected_reply(session, reply_message: Message) -> None:
     protected = await session.scalar(
         select(Media)
         .join(Message, Message.id == Media.message_id)
-        .where(
-            Message.business_connection_id == reply_message.business_connection_id,
-            Message.telegram_chat_id == reply_message.telegram_chat_id,
-            Message.telegram_message_id == reply_message.reply_to_message_id,
-            Media.is_protected.is_(True),
-        )
+        .where(Message.business_connection_id == reply_message.business_connection_id, Message.telegram_chat_id == reply_message.telegram_chat_id, Message.telegram_message_id == reply_message.reply_to_message_id, Media.is_protected.is_(True))
         .order_by(Media.id)
         .limit(1)
     )
     if protected is None:
-        logger.info(
-            "protected_reply_target_not_found",
-            reply_message_id=reply_message.id,
-            target_telegram_message_id=reply_message.reply_to_message_id,
-        )
+        logger.info("protected_reply_target_not_found", reply_message_id=reply_message.id, target_telegram_message_id=reply_message.reply_to_message_id)
         return
     decision = protected_reply_is_allowed(media=protected, reply_message=reply_message)
     if not decision.allowed:
-        logger.warning(
-            "protected_media_delivery_blocked",
-            media_id=protected.id,
-            message_id=reply_message.id,
-            reason=decision.reason,
-        )
+        logger.warning("protected_media_delivery_blocked", media_id=protected.id, message_id=reply_message.id, reason=decision.reason)
         return
     if not prefs.notifications_enabled or not prefs.notify_protected_media:
         return
@@ -211,20 +195,12 @@ async def _queue_protected_reply(session, reply_message: Message) -> None:
         session,
         redis,
         kind="deliver_protected_media",
-        payload={
-            "media_id": protected.id,
-            "owner_user_id": user.id,
-            "dialog_name": dialog.peer_name or dialog.peer_username,
-        },
+        payload={"media_id": protected.id, "owner_user_id": user.id, "dialog_name": dialog.peer_name or dialog.peer_username},
         idempotency_key=f"protected-reply:{reply_message.id}:{protected.id}",
     )
 
 
-async def _handle_webhook(
-    secret: str,
-    request: Request,
-    x_telegram_bot_api_secret_token: str | None,
-) -> dict[str, bool]:
+async def _handle_webhook(secret: str, request: Request, x_telegram_bot_api_secret_token: str | None) -> dict[str, bool]:
     if secret != settings.telegram_webhook_secret and x_telegram_bot_api_secret_token != settings.telegram_webhook_secret:
         raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -255,6 +231,20 @@ async def _handle_webhook(
                 if message and created:
                     await _queue_media_downloads(session, message)
                     await _queue_protected_reply(session, message)
+                    context = await _owner_context(session, message)
+                    if context:
+                        qualified_referrer = await qualify_referral(session, referred_user_id=context[0].id)
+                        if qualified_referrer:
+                            await enqueue_job(
+                                session,
+                                redis,
+                                kind="send_text",
+                                payload={
+                                    "telegram_id": qualified_referrer.telegram_id,
+                                    "text": "✅ <b>Друг выполнил условия</b>\n\nОн подключил Telegram Business и начал пользоваться Phantom. Вам начислен бонусный доступ.",
+                                },
+                                idempotency_key=f"referral-qualified:{qualified_referrer.id}:{context[0].id}",
+                            )
 
             elif update.edited_business_message:
                 message, changed, _ = await edit_business_message(session, update.edited_business_message)
@@ -262,23 +252,17 @@ async def _handle_webhook(
                     context = await _owner_context(session, message)
                     if context and context[2].notifications_enabled and context[2].notify_edits:
                         user, dialog, prefs = context
-                        versions = list((await session.scalars(
-                            select(MessageVersion)
-                            .where(MessageVersion.message_id == message.id)
-                            .order_by(MessageVersion.version_number)
-                        )).all())
+                        versions = list((await session.scalars(select(MessageVersion).where(MessageVersion.message_id == message.id).order_by(MessageVersion.version_number))).all())
+                        funnel = await get_funnel_config()
+                        redacted = notification_is_redacted(user, funnel)
                         await enqueue_job(
                             session,
                             redis,
                             kind="send_text",
                             payload={
                                 "telegram_id": user.telegram_id,
-                                "text": format_edit_notification(
-                                    dialog=dialog,
-                                    settings=prefs,
-                                    message=message,
-                                    versions=versions,
-                                ),
+                                "text": _redacted_edit(funnel, message) if redacted else format_edit_notification(dialog=dialog, settings=prefs, message=message, versions=versions),
+                                "reply_markup": _paywall_markup(funnel) if redacted else None,
                             },
                             idempotency_key=f"edit:{update_id}:{message.id}",
                         )
@@ -291,13 +275,16 @@ async def _handle_webhook(
                     context = await _owner_context(session, message)
                     if context and context[2].notifications_enabled and context[2].notify_deletions:
                         user, dialog, prefs = context
+                        funnel = await get_funnel_config()
+                        redacted = notification_is_redacted(user, funnel)
                         await enqueue_job(
                             session,
                             redis,
                             kind="send_text",
                             payload={
                                 "telegram_id": user.telegram_id,
-                                "text": format_delete_notification(dialog=dialog, settings=prefs, message=message),
+                                "text": _redacted_delete(funnel, message) if redacted else format_delete_notification(dialog=dialog, settings=prefs, message=message),
+                                "reply_markup": _paywall_markup(funnel) if redacted else None,
                             },
                             idempotency_key=f"delete:{update_id}:{index}:{message.id}",
                         )
@@ -311,32 +298,15 @@ async def _handle_webhook(
     except Exception as exc:
         logger.exception("telegram_update_failed", update_id=update_id, kind=kind, correlation_id=correlation_id)
         async with SessionLocal() as session, session.begin():
-            session.add(FailedUpdate(
-                update_id=update_id,
-                update_type=kind,
-                payload=payload,
-                error=str(exc),
-                stack_trace=traceback.format_exc(),
-                attempts=1,
-                resolved=False,
-                correlation_id=correlation_id,
-            ))
+            session.add(FailedUpdate(update_id=update_id, update_type=kind, payload=payload, error=str(exc), stack_trace=traceback.format_exc(), attempts=1, resolved=False, correlation_id=correlation_id))
         return {"ok": True}
 
 
 @router.post("/telegram/webhook/{secret}", status_code=200)
-async def telegram_webhook(
-    secret: str,
-    request: Request,
-    x_telegram_bot_api_secret_token: str | None = Header(default=None),
-) -> dict[str, bool]:
+async def telegram_webhook(secret: str, request: Request, x_telegram_bot_api_secret_token: str | None = Header(default=None)) -> dict[str, bool]:
     return await _handle_webhook(secret, request, x_telegram_bot_api_secret_token)
 
 
 @router.post("/api/telegram/webhook/{secret}", status_code=200, include_in_schema=False)
-async def legacy_telegram_webhook(
-    secret: str,
-    request: Request,
-    x_telegram_bot_api_secret_token: str | None = Header(default=None),
-) -> dict[str, bool]:
+async def legacy_telegram_webhook(secret: str, request: Request, x_telegram_bot_api_secret_token: str | None = Header(default=None)) -> dict[str, bool]:
     return await _handle_webhook(secret, request, x_telegram_bot_api_secret_token)
