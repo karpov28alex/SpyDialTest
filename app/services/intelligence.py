@@ -30,26 +30,42 @@ async def build_user_intelligence(
     days = max(7, min(int(days), 3650))
     now = datetime.now(UTC)
     since = now - timedelta(days=days)
-    dialog_filter = Dialog.owner_user_id == user.id
 
-    totals_row = (
-        await session.execute(
-            select(
-                func.count(func.distinct(Dialog.id)).label("dialogs"),
-                func.count(Message.id).label("messages"),
-                func.count(Media.id).label("media"),
-                func.sum(case((Message.is_deleted.is_(True), 1), else_=0)).label("deleted"),
-                func.sum(case((Message.edited_at.is_not(None), 1), else_=0)).label("edited"),
-                func.sum(case((Media.is_protected.is_(True), 1), else_=0)).label("protected"),
-                func.min(Message.sent_at).label("first_message_at"),
-                func.max(Message.sent_at).label("last_message_at"),
-            )
-            .select_from(Dialog)
-            .outerjoin(Message, Message.dialog_id == Dialog.id)
-            .outerjoin(Media, Media.message_id == Message.id)
-            .where(dialog_filter)
-        )
-    ).one()
+    dialogs_total = int(
+        await session.scalar(select(func.count(Dialog.id)).where(Dialog.owner_user_id == user.id)) or 0
+    )
+    message_scope = select(Message.id).join(Dialog, Dialog.id == Message.dialog_id).where(Dialog.owner_user_id == user.id)
+    messages_total = int(await session.scalar(select(func.count()).select_from(message_scope.subquery())) or 0)
+    deleted_total = int(
+        await session.scalar(
+            select(func.count(Message.id))
+            .join(Dialog, Dialog.id == Message.dialog_id)
+            .where(Dialog.owner_user_id == user.id, Message.is_deleted.is_(True))
+        ) or 0
+    )
+    edited_total = int(
+        await session.scalar(
+            select(func.count(Message.id))
+            .join(Dialog, Dialog.id == Message.dialog_id)
+            .where(Dialog.owner_user_id == user.id, Message.edited_at.is_not(None))
+        ) or 0
+    )
+    media_total = int(
+        await session.scalar(
+            select(func.count(Media.id))
+            .join(Message, Message.id == Media.message_id)
+            .join(Dialog, Dialog.id == Message.dialog_id)
+            .where(Dialog.owner_user_id == user.id)
+        ) or 0
+    )
+    protected_total = int(
+        await session.scalar(
+            select(func.count(Media.id))
+            .join(Message, Message.id == Media.message_id)
+            .join(Dialog, Dialog.id == Message.dialog_id)
+            .where(Dialog.owner_user_id == user.id, Media.is_protected.is_(True))
+        ) or 0
+    )
 
     period_rows = (
         await session.execute(
@@ -79,34 +95,45 @@ async def build_user_intelligence(
         )
     ).all()
 
-    async def leader(value_expr, *extra_where):
+    async def message_leader(*extra_where):
         return (
             await session.execute(
                 select(
                     Dialog.id.label("dialog_id"),
                     Dialog.peer_name,
                     Dialog.peer_username,
-                    value_expr.label("value"),
+                    func.count(Message.id).label("value"),
                 )
                 .join(Message, Message.dialog_id == Dialog.id)
-                .outerjoin(Media, Media.message_id == Message.id)
                 .where(Dialog.owner_user_id == user.id, *extra_where)
                 .group_by(Dialog.id, Dialog.peer_name, Dialog.peer_username)
-                .order_by(value_expr.desc(), Dialog.id)
+                .order_by(func.count(Message.id).desc(), Dialog.id)
                 .limit(1)
             )
         ).first()
 
-    active = await leader(func.count(func.distinct(Message.id)))
-    media_leader = await leader(func.count(Media.id), Media.id.is_not(None))
-    deleted_leader = await leader(
-        func.sum(case((Message.is_deleted.is_(True), 1), else_=0)),
-        Message.is_deleted.is_(True),
-    )
-    protected_leader = await leader(
-        func.sum(case((Media.is_protected.is_(True), 1), else_=0)),
-        Media.is_protected.is_(True),
-    )
+    async def media_leader(*extra_where):
+        return (
+            await session.execute(
+                select(
+                    Dialog.id.label("dialog_id"),
+                    Dialog.peer_name,
+                    Dialog.peer_username,
+                    func.count(Media.id).label("value"),
+                )
+                .join(Message, Message.dialog_id == Dialog.id)
+                .join(Media, Media.message_id == Message.id)
+                .where(Dialog.owner_user_id == user.id, *extra_where)
+                .group_by(Dialog.id, Dialog.peer_name, Dialog.peer_username)
+                .order_by(func.count(Media.id).desc(), Dialog.id)
+                .limit(1)
+            )
+        ).first()
+
+    active = await message_leader()
+    media_top = await media_leader()
+    deleted_leader = await message_leader(Message.is_deleted.is_(True))
+    protected_leader = await media_leader(Media.is_protected.is_(True))
 
     longest = (
         await session.execute(
@@ -121,7 +148,7 @@ async def build_user_intelligence(
             .join(Message, Message.dialog_id == Dialog.id)
             .where(Dialog.owner_user_id == user.id)
             .group_by(Dialog.id, Dialog.peer_name, Dialog.peer_username)
-            .order_by(func.count(Message.id).desc())
+            .order_by(func.count(Message.id).desc(), Dialog.id)
             .limit(1)
         )
     ).first()
@@ -129,20 +156,20 @@ async def build_user_intelligence(
     access = await access_state(session, user)
     locked = not access.active
     totals = {
-        "dialogs": int(totals_row.dialogs or 0),
-        "messages": int(totals_row.messages or 0),
-        "media": int(totals_row.media or 0),
-        "deleted": int(totals_row.deleted or 0),
-        "edited": int(totals_row.edited or 0),
-        "protected": int(totals_row.protected or 0),
+        "dialogs": dialogs_total,
+        "messages": messages_total,
+        "media": media_total,
+        "deleted": deleted_total,
+        "edited": edited_total,
+        "protected": protected_total,
     }
 
     peak_hour = max(hourly_rows, key=lambda row: int(row.messages or 0), default=None)
     insights: list[str] = []
     if active:
         insights.append(f"Чаще всего вы общаетесь с {active.peer_name or active.peer_username or 'одним из собеседников'}.")
-    if media_leader:
-        insights.append(f"Больше всего медиа связано с {media_leader.peer_name or media_leader.peer_username or 'одним из диалогов'}.")
+    if media_top:
+        insights.append(f"Больше всего медиа связано с {media_top.peer_name or media_top.peer_username or 'одним из диалогов'}.")
     if deleted_leader:
         insights.append(f"Чаще остальных сообщения удаляет {deleted_leader.peer_name or deleted_leader.peer_username or 'один из собеседников'}.")
     if peak_hour is not None:
@@ -190,7 +217,7 @@ async def build_user_intelligence(
         "hours": [{"hour": int(row.hour), "messages": int(row.messages or 0)} for row in hourly_rows],
         "leaders": {
             "active": maybe_contact(active),
-            "media": maybe_contact(media_leader),
+            "media": maybe_contact(media_top),
             "deleted": maybe_contact(deleted_leader),
             "protected": maybe_contact(protected_leader),
             "longest": longest_payload,
