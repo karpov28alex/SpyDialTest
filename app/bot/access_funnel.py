@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import json
-from dataclasses import asdict
+from urllib.parse import quote
 
 from aiogram import F, Router
 from aiogram.filters import BaseFilter, Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
-from redis.asyncio import Redis
 
 from app.bot.admin_console import home_keyboard, is_admin, user_menu
 from app.bot.setup import bot
@@ -62,11 +60,19 @@ def expired_keyboard(payment_url: str, payment_button_text: str) -> InlineKeyboa
     return keyboard(rows)
 
 
+def referral_share_url(link: str) -> str:
+    text = (
+        "👻 Phantom сохраняет удалённые и изменённые сообщения, скрытые медиа "
+        "и собирает приватный архив Telegram Business. Попробуй по моей ссылке:"
+    )
+    return f"https://t.me/share/url?url={quote(link, safe='')}&text={quote(text, safe='')}"
+
+
 def funnel_admin_keyboard(config) -> InlineKeyboardMarkup:
     toggle = lambda value: "✅" if value else "❌"
     return keyboard([
         [InlineKeyboardButton(text=f"{toggle(config.enabled)} Воронка доступа", callback_data="funnel:toggle:enabled")],
-        [InlineKeyboardButton(text=f"{toggle(config.channel_required)} Подписка на канал", callback_data="funnel:toggle:channel_required")],
+        [InlineKeyboardButton(text="🔒 Подписка на канал обязательна", callback_data="funnel:channel_locked")],
         [InlineKeyboardButton(text=f"{toggle(config.referral_required)} Приглашение друга", callback_data="funnel:toggle:referral_required")],
         [InlineKeyboardButton(text=f"{toggle(config.redact_expired_notifications)} Цензура уведомлений", callback_data="funnel:toggle:redact_expired_notifications")],
         [InlineKeyboardButton(text="📢 Канал", callback_data="funnel:fields:channel"), InlineKeyboardButton(text="💳 Оплата", callback_data="funnel:fields:payment")],
@@ -90,16 +96,14 @@ async def show_funnel_admin(message: Message) -> None:
         f"Канал: <b>{config.channel_title or 'не указан'}</b>\n"
         f"ID: <code>{config.channel_id or 'не указан'}</code>\n"
         f"Оплата: <code>{config.payment_url or 'не указана'}</code>\n\n"
-        "Основные переключатели доступны ниже. Все тексты и ссылки можно изменить по кнопкам.",
+        "Подписка на канал обязательна и не отключается. Остальные параметры доступны ниже.",
         reply_markup=funnel_admin_keyboard(config),
     )
 
 
 async def send_access_screen(message: Message, user) -> None:
     config = await get_funnel_config()
-    if config.enabled and config.channel_required and not await channel_gate_passed(
-        bot, user_id=user.telegram_id, config=config
-    ):
+    if config.enabled and not await channel_gate_passed(bot, user_id=user.telegram_id, config=config):
         await message.answer(config.subscription_text, reply_markup=subscription_keyboard(config.channel_url))
         return
 
@@ -177,14 +181,23 @@ async def invite_friend(callback: CallbackQuery) -> None:
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start=ref_{referral_code(user)}"
     text = (
-        "<b>Пригласите друга в Phantom</b>\n\n"
-        "Бонус будет начислен после того, как друг перейдёт по вашей ссылке, подключит Telegram Business "
-        "и начнёт пользоваться архивом.\n\n"
+        "<b>👥 Пригласите друга в Phantom</b>\n\n"
+        "Друг должен перейти по вашей ссылке, запустить бота, подключить Telegram Business "
+        "и начать пользоваться архивом.\n\n"
         f"Ваша ссылка:\n<code>{link}</code>"
     )
+    markup = keyboard([
+        [InlineKeyboardButton(text="🚀 Отправить другу", url=referral_share_url(link))],
+        [InlineKeyboardButton(text="📋 Скопировать ссылку", switch_inline_query=link)],
+    ])
     if callback.message:
-        await callback.message.answer(text)
+        await callback.message.answer(text, reply_markup=markup)
     await callback.answer()
+
+
+@router.callback_query(F.data == "funnel:channel_locked")
+async def channel_locked(callback: CallbackQuery) -> None:
+    await callback.answer("Подписка на информационный канал обязательна для всех пользователей.", show_alert=True)
 
 
 @router.callback_query(F.data == "funnel:admin")
@@ -204,8 +217,8 @@ async def toggle_setting(callback: CallbackQuery) -> None:
         return
     field = (callback.data or "").split(":", 2)[2]
     config = await get_funnel_config()
-    if field not in {"enabled", "channel_required", "referral_required", "redact_expired_notifications"}:
-        await callback.answer("Неизвестная настройка", show_alert=True)
+    if field not in {"enabled", "referral_required", "redact_expired_notifications"}:
+        await callback.answer("Эту настройку нельзя отключить", show_alert=True)
         return
     updated = await save_funnel_config({field: not getattr(config, field)})
     if callback.message:
