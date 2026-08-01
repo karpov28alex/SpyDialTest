@@ -46,7 +46,7 @@ class FunnelConfig:
     )
     referral_bonus_success_text: str = (
         "🎉 <b>Друг успешно подключил Phantom!</b>\n\n"
-        "Он подписался на канал, подключил Telegram Business и начал пользоваться сервисом.\n\n"
+        "Он выполнил условия реферальной программы.\n\n"
         "🎁 Вы получаете <b>+{days} дня полного доступа без ограничений</b>."
     )
     referral_share_text: str = (
@@ -85,8 +85,6 @@ async def get_funnel_config(redis: Redis | None = None) -> FunnelConfig:
                 values[key] = raw.lower() in {"1", "true", "yes", "on"}
             else:
                 values[key] = raw
-        values["enabled"] = True
-        values["channel_required"] = True
         return FunnelConfig(**values)
     finally:
         if own:
@@ -100,14 +98,15 @@ async def save_funnel_config(values: dict[str, Any], redis: Redis | None = None)
         current = asdict(await get_funnel_config(redis))
         allowed = set(current)
         for key, value in values.items():
-            if key not in allowed or value is None or key in {"enabled", "channel_required"}:
+            if key not in allowed or value is None:
                 continue
             if isinstance(current[key], bool):
-                current[key] = bool(value)
+                if isinstance(value, str):
+                    current[key] = value.lower() in {"1", "true", "yes", "on"}
+                else:
+                    current[key] = bool(value)
             else:
                 current[key] = str(value).strip()
-        current["enabled"] = True
-        current["channel_required"] = True
         await redis.hset(
             CONFIG_KEY,
             mapping={
@@ -178,6 +177,8 @@ async def check_channel_membership(bot: Bot, *, user_id: int, channel_id: str) -
 
 async def channel_gate_passed(bot: Bot, *, user_id: int, config: FunnelConfig | None = None) -> bool:
     config = config or await get_funnel_config()
+    if not config.enabled or not config.channel_required:
+        return True
     ok = await check_channel_membership(bot, user_id=user_id, channel_id=config.channel_id)
     if ok:
         await mark_channel_verified(user_id)
@@ -187,7 +188,11 @@ async def channel_gate_passed(bot: Bot, *, user_id: int, config: FunnelConfig | 
 
 
 def notification_is_redacted(user: User, config: FunnelConfig) -> bool:
-    return bool(config.redact_expired_notifications and not has_access(user))
+    return bool(
+        config.enabled
+        and config.redact_expired_notifications
+        and not has_access(user)
+    )
 
 
 def serialize_config(config: FunnelConfig) -> dict[str, Any]:
