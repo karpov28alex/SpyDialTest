@@ -1,1 +1,141 @@
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="dark"><title>Phantom Control Center</title><style>:root{--bg:#07050c;--line:#392650;--text:#fff;--muted:#aa9dbb;--accent:#a33cff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 Inter,system-ui,sans-serif}.shell{display:grid;grid-template-columns:230px 1fr;min-height:100dvh}.side{padding:18px 12px;border-right:1px solid var(--line);background:#0b0811;position:sticky;top:0;height:100dvh}.brand{font-size:20px;font-weight:900;margin:4px 8px 20px}.brand small{display:block;color:var(--muted);font-size:10px;letter-spacing:.15em}.nav{display:grid;gap:7px}.nav button{border:0;border-radius:12px;padding:12px;text-align:left;background:transparent;color:var(--muted);cursor:pointer}.nav button.active{background:linear-gradient(90deg,rgba(163,60,255,.28),rgba(163,60,255,.08));color:white}.main{min-width:0}.frame{border:0;width:100%;height:100dvh;display:none;background:var(--bg)}.frame.active{display:block}@media(max-width:850px){.shell{display:block}.side{height:auto;position:sticky;z-index:20;border-right:0;border-bottom:1px solid var(--line);padding:10px}.brand{margin:0 8px 8px}.nav{display:flex;overflow:auto}.nav button{white-space:nowrap}.frame{height:calc(100dvh - 92px)}}</style></head><body><div class="shell"><aside class="side"><div class="brand">PHANTOM<small>CONTROL CENTER</small></div><nav class="nav"><button class="active" data-frame="panel">Панель</button><button data-frame="support">Поддержка</button><button data-frame="user360">User 360</button></nav></aside><main class="main"><iframe id="panel" class="frame active" src="/admin/index.html?v=0.8.4"></iframe><iframe id="support" class="frame" src="/admin/support.html?v=0.8.4"></iframe><iframe id="user360" class="frame" src="/admin/user360.html?v=0.8.4"></iframe></main></div><script>document.querySelectorAll('[data-frame]').forEach(button=>button.onclick=()=>{document.querySelectorAll('[data-frame],.frame').forEach(node=>node.classList.remove('active'));button.classList.add('active');document.getElementById(button.dataset.frame).classList.add('active')});</script></body></html>
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Phantom Control Center</title>
+<style>
+:root{--bg:#07050c;--line:#392650;--text:#fff;--muted:#aa9dbb;--accent:#a33cff}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font:14px/1.4 Inter,system-ui,sans-serif;overflow:hidden}
+.shell{display:grid;grid-template-columns:230px minmax(0,1fr);height:100dvh;min-height:100dvh}
+.side{padding:18px 12px;border-right:1px solid var(--line);background:#0b0811;height:100dvh;overflow:auto}
+.brand{font-size:20px;font-weight:900;margin:4px 8px 20px}
+.brand small{display:block;color:var(--muted);font-size:10px;letter-spacing:.15em}
+.nav{display:grid;gap:7px}
+.nav button{border:0;border-radius:12px;padding:12px;text-align:left;background:transparent;color:var(--muted);cursor:pointer;font:inherit}
+.nav button.active{background:linear-gradient(90deg,rgba(163,60,255,.28),rgba(163,60,255,.08));color:white}
+.main{min-width:0;height:100dvh;overflow:hidden;position:relative}
+.frame{position:absolute;inset:0;border:0;width:100%;height:100%;display:none;background:var(--bg)}
+.frame.active{display:block}
+.loading{position:absolute;inset:0;display:grid;place-items:center;color:var(--muted);background:var(--bg);z-index:3}
+.loading.hidden{display:none}
+@media(max-width:850px){
+ html,body{overflow:hidden}
+ .shell{display:flex;flex-direction:column;height:100dvh}
+ .side{height:auto;flex:0 0 auto;border-right:0;border-bottom:1px solid var(--line);padding:12px 12px 10px;overflow:visible;position:relative;z-index:20}
+ .brand{margin:0 8px 9px;font-size:18px}
+ .brand small{font-size:9px}
+ .nav{display:flex;gap:5px;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:none;padding-bottom:1px}
+ .nav::-webkit-scrollbar{display:none}
+ .nav button{white-space:nowrap;padding:10px 14px;flex:0 0 auto}
+ .main{height:auto;flex:1;min-height:0}
+}
+</style>
+</head>
+<body>
+<div class="shell">
+ <aside class="side">
+  <div class="brand">PHANTOM<small>CONTROL CENTER</small></div>
+  <nav class="nav">
+   <button class="active" data-frame="panel" data-src="/admin/index.html?v=0.8.5">Панель</button>
+   <button data-frame="support" data-src="/admin/support.html?v=0.8.5">Поддержка</button>
+   <button data-frame="user360" data-src="/admin/user360.html?v=0.8.5">User 360</button>
+  </nav>
+ </aside>
+ <main class="main">
+  <div id="loading" class="loading">Загрузка…</div>
+  <iframe id="panel" class="frame active" title="Панель"></iframe>
+  <iframe id="support" class="frame" title="Поддержка"></iframe>
+  <iframe id="user360" class="frame" title="User 360"></iframe>
+ </main>
+</div>
+<script>
+const loading=document.getElementById('loading');
+const frames={panel:document.getElementById('panel'),support:document.getElementById('support'),user360:document.getElementById('user360')};
+const loaded=new Set();
+
+function getAdminToken(){
+  try{
+    const own=sessionStorage.getItem('adminToken')||localStorage.getItem('adminToken');
+    if(own)return own;
+    return frames.panel.contentWindow?.sessionStorage?.getItem('adminToken')||frames.panel.contentWindow?.localStorage?.getItem('adminToken');
+  }catch(_){return null}
+}
+
+function bridgeToken(frame){
+  const token=getAdminToken();
+  if(!token)return;
+  try{
+    frame.contentWindow.sessionStorage.setItem('adminToken',token);
+    frame.contentWindow.localStorage.setItem('adminToken',token);
+    sessionStorage.setItem('adminToken',token);
+    localStorage.setItem('adminToken',token);
+  }catch(_){}
+}
+
+function normalizeChild(name,frame){
+  try{
+    const doc=frame.contentDocument;
+    if(!doc)return;
+    if(name==='panel'){
+      const style=doc.createElement('style');
+      style.dataset.unifiedAdmin='1';
+      style.textContent=`
+        html,body{min-height:100%!important}
+        body{overflow-x:hidden!important}
+        .shell{display:block!important;min-height:100%!important}
+        .side{display:none!important}
+        .main{max-width:none!important;width:100%!important;padding:18px!important}
+        @media(max-width:850px){.main{padding:12px!important}.top{align-items:flex-start!important}.top h1{font-size:28px!important}}
+      `;
+      if(!doc.querySelector('style[data-unified-admin]'))doc.head.appendChild(style);
+    }else if(name==='support'){
+      const back=doc.querySelector('a[href="/admin"]');
+      if(back)back.style.display='none';
+    }
+  }catch(_){}
+}
+
+function watchNavigation(name,frame){
+  try{
+    const path=frame.contentWindow.location.pathname;
+    if(path==='/admin'&&name!=='panel'){
+      loaded.delete(name);
+      bridgeToken(frame);
+      frame.contentWindow.location.replace(document.querySelector(`[data-frame="${name}"]`).dataset.src);
+    }
+  }catch(_){}
+}
+
+function loadFrame(name){
+  const frame=frames[name];
+  if(loaded.has(name))return;
+  loading.classList.remove('hidden');
+  bridgeToken(frame);
+  frame.src=document.querySelector(`[data-frame="${name}"]`).dataset.src;
+  loaded.add(name);
+}
+
+Object.entries(frames).forEach(([name,frame])=>{
+  frame.addEventListener('load',()=>{
+    bridgeToken(frame);
+    normalizeChild(name,frame);
+    watchNavigation(name,frame);
+    loading.classList.add('hidden');
+  });
+});
+
+document.querySelectorAll('[data-frame]').forEach(button=>button.addEventListener('click',()=>{
+  document.querySelectorAll('[data-frame],.frame').forEach(node=>node.classList.remove('active'));
+  button.classList.add('active');
+  const name=button.dataset.frame;
+  frames[name].classList.add('active');
+  loadFrame(name);
+}));
+
+loadFrame('panel');
+</script>
+</body>
+</html>
