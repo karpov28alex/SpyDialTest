@@ -122,7 +122,6 @@ async def qualify_referral(session: AsyncSession, *, referred_user_id: int) -> U
     if referred is None:
         return None
 
-    # Lazy imports avoid coupling the persistence service to bot startup.
     from app.bot.setup import bot
     from app.services.access_funnel import channel_gate_passed
 
@@ -158,7 +157,14 @@ async def qualify_referral(session: AsyncSession, *, referred_user_id: int) -> U
     referrer.subscription_status = SubscriptionStatus.referral
     referral.bonus_granted_at = now
     await session.flush()
-    return referrer
+
+    await bot.send_message(
+        referrer.telegram_id,
+        funnel.referral_bonus_success_text.format(days=config.referral_bonus_days),
+    )
+    # The webhook has a legacy generic notification when a user is returned.
+    # Returning None prevents a duplicate while the bonus is already committed.
+    return None
 
 
 def new_idempotency_key(prefix: str) -> str:
