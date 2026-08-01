@@ -8,9 +8,10 @@ from sqlalchemy import desc, func, select
 from app.api.deps import CurrentUser, SessionDep
 from app.core.config import Settings, get_settings
 from app.core.security import create_token, decode_token
-from app.db.models import BusinessConnection, Dialog, Media, Message, MessageVersion
+from app.db.models import BusinessConnection, Dialog, Media, Message, MessageVersion, User
 from app.db.session import get_session
 from app.services.access import access_state, get_monetization_settings, payment_plans
+from app.services.access_funnel import channel_verified, get_funnel_config
 from app.services.media import safe_media_path
 from app.services.users import referral_code
 
@@ -22,11 +23,38 @@ def avatar_url(user_id: int, dialog_id: int, settings: Settings) -> str:
     return f"/api/avatar/{token}"
 
 
+async def require_archive_access(user: User, session: SessionDep) -> None:
+    funnel = await get_funnel_config()
+    if funnel.enabled and funnel.channel_required and not await channel_verified(user.telegram_id):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "CHANNEL_SUBSCRIPTION_REQUIRED",
+                "message": funnel.subscription_text,
+                "channel_url": funnel.channel_url,
+            },
+        )
+    access = await access_state(session, user)
+    if funnel.enabled and not access.active:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "PAYMENT_REQUIRED",
+                "message": funnel.referral_text if user.referral_bonus_granted_at is None else funnel.payment_required_text,
+                "payment_url": funnel.payment_url,
+                "payment_button_text": funnel.payment_button_text,
+                "referral_available": user.referral_bonus_granted_at is None,
+            },
+        )
+
+
 @router.get("/me")
 async def me(user: CurrentUser, session: SessionDep, settings: Settings = Depends(get_settings)) -> dict:
     connection = await session.scalar(select(BusinessConnection).where(BusinessConnection.owner_user_id == user.id, BusinessConnection.is_active.is_(True)))
     config = await get_monetization_settings(session)
+    funnel = await get_funnel_config()
     access = await access_state(session, user)
+    verified = await channel_verified(user.telegram_id)
     referral_link = f"https://t.me/{settings.telegram_bot_username}?start=ref_{referral_code(user)}"
     return {
         "id": user.id,
@@ -41,13 +69,26 @@ async def me(user: CurrentUser, session: SessionDep, settings: Settings = Depend
             "ends_at": access.ends_at,
             "needs_payment": access.needs_payment,
         },
+        "funnel": {
+            "enabled": funnel.enabled,
+            "channel_required": funnel.channel_required,
+            "channel_verified": verified,
+            "channel_title": funnel.channel_title,
+            "channel_url": funnel.channel_url,
+            "subscription_text": funnel.subscription_text,
+            "referral_required": funnel.referral_required,
+            "referral_text": funnel.referral_text,
+            "payment_required_text": funnel.payment_required_text,
+            "payment_button_text": funnel.payment_button_text,
+            "payment_url": funnel.payment_url,
+        },
         "monetization": {
             "free_trial_enabled": config.free_trial_enabled,
             "show_trial_in_profile": config.show_trial_in_profile,
             "show_tariffs": config.show_tariffs,
             "referral_available": user.referral_bonus_granted_at is None,
             "referral_link": referral_link,
-            "payment_url": config.payment_placeholder_url,
+            "payment_url": funnel.payment_url or config.payment_placeholder_url,
             "plans": payment_plans(config) if config.show_tariffs else [],
             "demo": True,
         },
@@ -57,11 +98,13 @@ async def me(user: CurrentUser, session: SessionDep, settings: Settings = Depend
 @router.get("/subscription")
 async def subscription(user: CurrentUser, session: SessionDep, settings: Settings = Depends(get_settings)) -> dict:
     config = await get_monetization_settings(session)
+    funnel = await get_funnel_config()
     access = await access_state(session, user)
     return {
         "access": {"active": access.active, "source": access.source, "ends_at": access.ends_at},
         "plans": payment_plans(config) if config.show_tariffs else [],
-        "payment_url": config.payment_placeholder_url,
+        "payment_url": funnel.payment_url or config.payment_placeholder_url,
+        "payment_button_text": funnel.payment_button_text,
         "referral_link": f"https://t.me/{settings.telegram_bot_username}?start=ref_{referral_code(user)}",
         "referral_available": user.referral_bonus_granted_at is None,
         "demo": True,
@@ -70,6 +113,7 @@ async def subscription(user: CurrentUser, session: SessionDep, settings: Setting
 
 @router.get("/dialogs")
 async def dialogs(user: CurrentUser, session: SessionDep, limit: int = Query(30, ge=1, le=100), cursor: int | None = None) -> dict:
+    await require_archive_access(user, session)
     stmt = select(Dialog).where(Dialog.owner_user_id == user.id).order_by(desc(Dialog.last_message_at), desc(Dialog.id)).limit(limit + 1)
     if cursor:
         stmt = stmt.where(Dialog.id < cursor)
@@ -94,6 +138,7 @@ async def dialogs(user: CurrentUser, session: SessionDep, limit: int = Query(30,
 
 @router.get("/dialogs/{dialog_id}")
 async def dialog_detail(dialog_id: int, user: CurrentUser, session: SessionDep, limit: int = Query(50, ge=1, le=100), before_id: int | None = None) -> dict:
+    await require_archive_access(user, session)
     dialog = await session.scalar(select(Dialog).where(Dialog.id == dialog_id, Dialog.owner_user_id == user.id))
     if not dialog:
         raise HTTPException(status_code=404, detail="Dialog not found")
@@ -140,6 +185,10 @@ async def download_media(token: str, session=Depends(get_session), settings: Set
         user_id, media_id = int(user_id_text), int(media_id_text)
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=403, detail="Invalid media token") from exc
+    owner = await session.get(User, user_id)
+    if not owner:
+        raise HTTPException(status_code=404, detail="User not found")
+    await require_archive_access(owner, session)
     row = await session.execute(select(Media, Message, Dialog).join(Message, Message.id == Media.message_id).join(Dialog, Dialog.id == Message.dialog_id).where(Media.id == media_id, Dialog.owner_user_id == user_id))
     result = row.first()
     if not result:
@@ -160,6 +209,7 @@ class DialogPatch(BaseModel):
 
 @router.patch("/dialogs/{dialog_id}")
 async def patch_dialog(dialog_id: int, body: DialogPatch, user: CurrentUser, session: SessionDep) -> dict:
+    await require_archive_access(user, session)
     dialog = await session.scalar(select(Dialog).where(Dialog.id == dialog_id, Dialog.owner_user_id == user.id))
     if not dialog:
         raise HTTPException(status_code=404, detail="Dialog not found")
@@ -171,6 +221,7 @@ async def patch_dialog(dialog_id: int, body: DialogPatch, user: CurrentUser, ses
 
 @router.get("/messages/{message_id}/versions")
 async def versions(message_id: int, user: CurrentUser, session: SessionDep) -> dict:
+    await require_archive_access(user, session)
     message = await session.scalar(select(Message).join(Dialog).where(Message.id == message_id, Dialog.owner_user_id == user.id))
     if not message:
         raise HTTPException(status_code=404, detail="Message not found")
