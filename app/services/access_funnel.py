@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -20,7 +19,7 @@ CHANNEL_VERIFIED_PREFIX = "phantom:access_funnel:channel_verified:"
 
 @dataclass(slots=True)
 class FunnelConfig:
-    enabled: bool = True
+    enabled: bool = False
     channel_required: bool = True
     channel_id: str = ""
     channel_url: str = ""
