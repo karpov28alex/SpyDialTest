@@ -19,8 +19,7 @@ CHANNEL_VERIFIED_PREFIX = "phantom:access_funnel:channel_verified:"
 
 @dataclass(slots=True)
 class FunnelConfig:
-    enabled: bool = False
-    # Подписка на информационный канал является обязательным этапом.
+    enabled: bool = True
     channel_required: bool = True
     channel_id: str = ""
     channel_url: str = ""
@@ -32,11 +31,28 @@ class FunnelConfig:
     subscription_error_text: str = (
         "Подписка пока не найдена. Подпишитесь на канал и повторите проверку."
     )
-    subscription_success_text: str = "✅ Подписка подтверждена. Доступ к Phantom открыт."
+    subscription_success_text: str = (
+        "✅ Подписка подтверждена. Ваш бесплатный доступ активирован."
+    )
     referral_required: bool = True
     referral_text: str = (
         "Бесплатный период завершён. Чтобы продолжить пользоваться Phantom, "
         "пригласите друга или оплатите доступ."
+    )
+    referral_started_text: str = (
+        "👀 По вашей ссылке перешёл новый пользователь.\n\n"
+        "Бонус будет начислен после того, как он подпишется на канал, "
+        "подключит Telegram Business и начнёт пользоваться Phantom."
+    )
+    referral_bonus_success_text: str = (
+        "🎉 <b>Друг успешно подключил Phantom!</b>\n\n"
+        "Он подписался на канал, подключил Telegram Business и начал пользоваться сервисом.\n\n"
+        "🎁 Вы получаете <b>+{days} дня полного доступа без ограничений</b>."
+    )
+    referral_share_text: str = (
+        "👻 Пользуюсь Phantom — он сохраняет удалённые и изменённые сообщения, "
+        "одноразовые фото и видео и собирает приватный архив Telegram Business. "
+        "Попробуй бесплатно по моей ссылке:"
     )
     payment_required_text: str = (
         "Бонусный доступ завершён. Для дальнейшего использования необходимо оплатить подписку."
@@ -57,9 +73,9 @@ async def get_funnel_config(redis: Redis | None = None) -> FunnelConfig:
     redis = redis or redis_client()
     try:
         data = await redis.hgetall(CONFIG_KEY)
+        defaults = asdict(FunnelConfig())
         if not data:
             return FunnelConfig()
-        defaults = asdict(FunnelConfig())
         values: dict[str, Any] = {}
         for key, default in defaults.items():
             raw = data.get(key)
@@ -69,7 +85,7 @@ async def get_funnel_config(redis: Redis | None = None) -> FunnelConfig:
                 values[key] = raw.lower() in {"1", "true", "yes", "on"}
             else:
                 values[key] = raw
-        # Канал нельзя отключить настройкой: это обязательный шаг воронки.
+        values["enabled"] = True
         values["channel_required"] = True
         return FunnelConfig(**values)
     finally:
@@ -84,12 +100,13 @@ async def save_funnel_config(values: dict[str, Any], redis: Redis | None = None)
         current = asdict(await get_funnel_config(redis))
         allowed = set(current)
         for key, value in values.items():
-            if key not in allowed or value is None or key == "channel_required":
+            if key not in allowed or value is None or key in {"enabled", "channel_required"}:
                 continue
             if isinstance(current[key], bool):
                 current[key] = bool(value)
             else:
                 current[key] = str(value).strip()
+        current["enabled"] = True
         current["channel_required"] = True
         await redis.hset(
             CONFIG_KEY,
@@ -105,7 +122,6 @@ async def save_funnel_config(values: dict[str, Any], redis: Redis | None = None)
 
 
 async def channel_verified(user_id: int, redis: Redis | None = None) -> bool:
-    """Последний успешный результат проверки. Не используется как вечный пропуск."""
     own = redis is None
     redis = redis or redis_client()
     try:
@@ -161,14 +177,7 @@ async def check_channel_membership(bot: Bot, *, user_id: int, channel_id: str) -
 
 
 async def channel_gate_passed(bot: Bot, *, user_id: int, config: FunnelConfig | None = None) -> bool:
-    """Всегда проверяет фактическое членство через Telegram.
-
-    Redis хранит только недолгий индикатор успешной проверки и не является
-    пропуском, поэтому выход из канала сразу закрывает защищённые функции.
-    """
     config = config or await get_funnel_config()
-    if not config.enabled:
-        return True
     ok = await check_channel_membership(bot, user_id=user_id, channel_id=config.channel_id)
     if ok:
         await mark_channel_verified(user_id)
@@ -178,11 +187,7 @@ async def channel_gate_passed(bot: Bot, *, user_id: int, config: FunnelConfig | 
 
 
 def notification_is_redacted(user: User, config: FunnelConfig) -> bool:
-    return bool(
-        config.enabled
-        and config.redact_expired_notifications
-        and not has_access(user)
-    )
+    return bool(config.redact_expired_notifications and not has_access(user))
 
 
 def serialize_config(config: FunnelConfig) -> dict[str, Any]:
