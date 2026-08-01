@@ -74,8 +74,8 @@ def referral_share_url(link: str, text: str) -> str:
 def funnel_admin_keyboard(config) -> InlineKeyboardMarkup:
     toggle = lambda value: "✅" if value else "❌"
     return keyboard([
-        [InlineKeyboardButton(text="✅ Воронка доступа обязательна", callback_data="funnel:locked")],
-        [InlineKeyboardButton(text="🔒 Подписка на канал обязательна", callback_data="funnel:channel_locked")],
+        [InlineKeyboardButton(text=f"{toggle(config.enabled)} Воронка доступа", callback_data="funnel:toggle:enabled")],
+        [InlineKeyboardButton(text=f"{toggle(config.channel_required)} Подписка на канал", callback_data="funnel:toggle:channel_required")],
         [InlineKeyboardButton(text=f"{toggle(config.referral_required)} Приглашение друга", callback_data="funnel:toggle:referral_required")],
         [InlineKeyboardButton(text=f"{toggle(config.redact_expired_notifications)} Цензура уведомлений", callback_data="funnel:toggle:redact_expired_notifications")],
         [InlineKeyboardButton(text="📢 Канал", callback_data="funnel:fields:channel"), InlineKeyboardButton(text="💳 Оплата", callback_data="funnel:fields:payment")],
@@ -95,17 +95,23 @@ async def show_funnel_admin(message: Message) -> None:
     config = await get_funnel_config()
     await message.answer(
         "<b>🔐 Доступ и воронка</b>\n\n"
+        f"Воронка: <b>{'включена' if config.enabled else 'выключена'}</b>\n"
+        f"Подписка на канал: <b>{'обязательна' if config.channel_required else 'не требуется'}</b>\n"
         f"Канал: <b>{config.channel_title or 'не указан'}</b>\n"
         f"ID: <code>{config.channel_id or 'не указан'}</code>\n"
         f"Оплата: <code>{config.payment_url or 'не указана'}</code>\n\n"
-        "Воронка и подписка на канал обязательны. Платёжный провайдер пока не подключён.",
+        "Все этапы можно включать и выключать кнопками. Платёжный провайдер пока не подключён.",
         reply_markup=funnel_admin_keyboard(config),
     )
 
 
 async def send_access_screen(message: Message, user: User) -> None:
     config = await get_funnel_config()
-    if not await channel_gate_passed(bot, user_id=user.telegram_id, config=config):
+    if config.enabled and config.channel_required and not await channel_gate_passed(
+        bot,
+        user_id=user.telegram_id,
+        config=config,
+    ):
         await message.answer(config.subscription_text, reply_markup=subscription_keyboard(config.channel_url))
         return
 
@@ -119,8 +125,9 @@ async def send_access_screen(message: Message, user: User) -> None:
             state = await access_state(session, user)
             referral_available = user.referral_bonus_granted_at is None
 
-    if not state.active:
-        text = config.referral_text if config.referral_required and referral_available else config.payment_required_text
+    if config.enabled and not state.active:
+        referral_available = config.referral_required and referral_available
+        text = config.referral_text if referral_available else config.payment_required_text
         await message.answer(
             text,
             reply_markup=expired_keyboard(config.payment_url, config.payment_button_text, referral_available),
@@ -154,8 +161,8 @@ async def start(message: Message, command: CommandObject) -> None:
                 referrer = await session.get(User, referral.referrer_user_id)
                 referrer_telegram_id = referrer.telegram_id if referrer else None
 
-    if referrer_telegram_id:
-        config = await get_funnel_config()
+    config = await get_funnel_config()
+    if referrer_telegram_id and config.enabled and config.referral_required:
         try:
             await bot.send_message(referrer_telegram_id, config.referral_started_text)
         except Exception:
@@ -175,6 +182,9 @@ async def admin_command(message: Message) -> None:
 @router.callback_query(F.data == "funnel:check_channel")
 async def check_channel(callback: CallbackQuery) -> None:
     config = await get_funnel_config()
+    if not config.enabled or not config.channel_required:
+        await callback.answer("Проверка подписки сейчас отключена.", show_alert=True)
+        return
     ok = await check_channel_membership(bot, user_id=callback.from_user.id, channel_id=config.channel_id)
     if not ok:
         await callback.answer(config.subscription_error_text, show_alert=True)
@@ -201,11 +211,17 @@ async def invite_friend(callback: CallbackQuery) -> None:
         await callback.answer("Сначала отправьте /start", show_alert=True)
         return
     config = await get_funnel_config()
+    if not config.enabled or not config.referral_required:
+        await callback.answer("Реферальный этап сейчас отключён.", show_alert=True)
+        return
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start=ref_{referral_code(user)}"
+    channel_condition = (
+        "подпишется на информационный канал, " if config.channel_required else ""
+    )
     text = (
         "<b>👥 Пригласите друга в Phantom</b>\n\n"
-        "После перехода друг обязательно подпишется на информационный канал, подключит Telegram Business и начнёт пользоваться Phantom.\n\n"
+        f"После перехода друг {channel_condition}подключит Telegram Business и начнёт пользоваться Phantom.\n\n"
         f"Ваша ссылка:\n<code>{link}</code>"
     )
     markup = keyboard([
@@ -215,11 +231,6 @@ async def invite_friend(callback: CallbackQuery) -> None:
     if callback.message:
         await callback.message.answer(text, reply_markup=markup)
     await callback.answer()
-
-
-@router.callback_query(F.data.in_({"funnel:channel_locked", "funnel:locked"}))
-async def locked_setting(callback: CallbackQuery) -> None:
-    await callback.answer("Воронка и подписка на информационный канал обязательны для всех пользователей.", show_alert=True)
 
 
 @router.callback_query(F.data == "funnel:admin")
@@ -239,8 +250,8 @@ async def toggle_setting(callback: CallbackQuery) -> None:
         return
     field = (callback.data or "").split(":", 2)[2]
     config = await get_funnel_config()
-    if field not in {"referral_required", "redact_expired_notifications"}:
-        await callback.answer("Эту настройку нельзя отключить", show_alert=True)
+    if field not in {"enabled", "channel_required", "referral_required", "redact_expired_notifications"}:
+        await callback.answer("Неизвестная настройка", show_alert=True)
         return
     updated = await save_funnel_config({field: not getattr(config, field)})
     if callback.message:
