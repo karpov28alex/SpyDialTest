@@ -20,6 +20,7 @@ from app.api.routes.admin_monetization import router as admin_monetization_route
 from app.api.routes.admin_user360 import router as admin_user360_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.avatar import router as avatar_router
+from app.api.routes.impaya import router as impaya_router
 from app.api.routes.user import router as user_router
 from app.api.routes.user_intelligence import router as user_intelligence_router
 from app.api.routes.webhook import router as webhook_router
@@ -77,6 +78,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(user_router)
 app.include_router(user_intelligence_router)
+app.include_router(impaya_router)
 app.include_router(avatar_router)
 app.include_router(admin_dialogs_router)
 app.include_router(admin_router)
