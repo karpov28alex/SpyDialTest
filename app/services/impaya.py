@@ -153,12 +153,16 @@ class ImpayaClient:
         merchant_user_id: str,
         description: str,
     ) -> dict[str, Any]:
+        terminal_name = self.settings.impaya_non3ds_terminal_name
+        if not terminal_name:
+            raise ImpayaError("IMPAYA_NON3DS_TERMINAL_NAME is not configured")
+
         amount_minor = int(amount_rub) * 100
         body = {
             "amount": amount_minor,
             "customer_operation_id": customer_operation_id,
             "description": description,
-            "terminal_name": self.settings.impaya_terminal_name,
+            "terminal_name": terminal_name,
             "merchant_user_id": merchant_user_id,
             "is_recurrent": True,
             "payment_initiator": "MIT",
@@ -177,13 +181,14 @@ class ImpayaClient:
         *,
         customer_operation_id: str,
         extended: bool = False,
+        terminal_name: str | None = None,
     ) -> dict[str, Any]:
         path = self.settings.impaya_state_extended_path if extended else self.settings.impaya_state_path
         return await self._request(
             "GET",
             path,
             params={
-                "terminal_name": self.settings.impaya_terminal_name,
+                "terminal_name": terminal_name or self.settings.impaya_terminal_name,
                 "customer_operation_id": customer_operation_id,
             },
         )
