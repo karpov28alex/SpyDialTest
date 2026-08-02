@@ -11,6 +11,7 @@ dispatcher = Dispatcher()
 
 # Specific handlers are registered before generic routers.
 from app.bot.channel_gate_middleware import ChannelGateMiddleware  # noqa: E402
+from app.bot.channel_check_override import router as channel_check_override_router  # noqa: E402
 from app.bot.access_center import router as access_center_router  # noqa: E402
 from app.bot.menu_editor_handlers import router as menu_editor_router  # noqa: E402
 from app.bot.admin_menu_editor_patch import router as admin_menu_editor_router  # noqa: E402
@@ -39,6 +40,9 @@ dispatcher.message.register(cancel_command, Command("cancel"))
 dispatcher.message.register(subscription_command, Command("subscription"))
 dispatcher.callback_query.register(pay_callback, F.data == "impaya:pay")
 
+# The exact verification handler is independent of setup/access_funnel and must
+# run before the legacy funnel callback to guarantee a single response.
+dispatcher.include_router(channel_check_override_router)
 dispatcher.include_router(access_center_router)
 
 # The access funnel is a user-facing router. It must be attached directly so
