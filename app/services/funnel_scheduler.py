@@ -8,15 +8,16 @@ from decimal import Decimal
 import structlog
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from redis.asyncio import Redis
-from sqlalchemy import or_, select
+from sqlalchemy import exists, or_, select
 
 from app.bot.setup import bot
 from app.core.config import get_settings
-from app.db.models import Payment, Subscription, SubscriptionStatus, User
+from app.db.models import BusinessConnection, Payment, Subscription, SubscriptionStatus, User
 from app.db.session import SessionLocal
 from app.services.access import get_monetization_settings, has_access
-from app.services.access_funnel import get_funnel_config
+from app.services.access_funnel import channel_gate_passed, get_funnel_config
 from app.services.impaya import ImpayaClient, ImpayaError, successful_state
+from app.services.users import synchronize_trial_access
 
 settings = get_settings()
 logger = structlog.get_logger()
@@ -31,13 +32,83 @@ def expired_keyboard(*, payment_url: str, payment_text: str, referral_available:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+async def reconcile_trial_prerequisites() -> tuple[int, int]:
+    """Freeze premature trials and start pending trials when both gates pass."""
+    config = await get_funnel_config()
+    if not config.enabled:
+        return 0, 0
+    now = datetime.now(UTC)
+    frozen = 0
+    started = 0
+    async with SessionLocal() as session:
+        # Existing free trials without an active Business connection must stop.
+        if config.business_required:
+            active_trials_without_business = list((await session.scalars(
+                select(User).where(
+                    User.subscription_status == SubscriptionStatus.trial,
+                    User.trial_ends_at > now,
+                    or_(User.vip_ends_at.is_(None), User.vip_ends_at <= now),
+                    ~exists(select(BusinessConnection.id).where(
+                        BusinessConnection.owner_user_id == User.id,
+                        BusinessConnection.is_active.is_(True),
+                    )),
+                ).limit(500)
+            )).all())
+            for user in active_trials_without_business:
+                if await synchronize_trial_access(session, user=user, channel_verified=False, now=now):
+                    started += 1
+                else:
+                    frozen += 1
+            if active_trials_without_business:
+                await session.commit()
+
+        # Pending users with Business connected start only after a live channel check.
+        pending_with_business = list((await session.scalars(
+            select(User).where(
+                User.trial_ends_at <= User.trial_started_at,
+                or_(User.vip_ends_at.is_(None), User.vip_ends_at <= now),
+                exists(select(BusinessConnection.id).where(
+                    BusinessConnection.owner_user_id == User.id,
+                    BusinessConnection.is_active.is_(True),
+                )),
+            ).order_by(User.id).limit(200)
+        )).all())
+        monetization = await get_monetization_settings(session)
+        for user in pending_with_business:
+            channel_ok = not config.channel_required or await channel_gate_passed(
+                bot,
+                user_id=user.telegram_id,
+                config=config,
+            )
+            if not channel_ok:
+                continue
+            if await synchronize_trial_access(session, user=user, channel_verified=True, now=now):
+                started += 1
+                try:
+                    await bot.send_message(
+                        user.telegram_id,
+                        config.trial_started_text.format(days=monetization.trial_days),
+                    )
+                except Exception:
+                    logger.exception("trial_started_notification_failed", user_id=user.id)
+        if pending_with_business:
+            await session.commit()
+    return frozen, started
+
+
 async def notify_expired_users(redis: Redis) -> int:
     config = await get_funnel_config(redis)
     if not config.enabled:
         return 0
     now = datetime.now(UTC)
     async with SessionLocal() as session:
-        users = list((await session.scalars(select(User).where(User.is_access_disabled.is_(False), User.blocked_bot_at.is_(None), User.trial_ends_at <= now, or_(User.vip_ends_at.is_(None), User.vip_ends_at <= now)).order_by(User.id).limit(500))).all())
+        users = list((await session.scalars(select(User).where(
+            User.is_access_disabled.is_(False),
+            User.blocked_bot_at.is_(None),
+            User.trial_ends_at <= now,
+            User.trial_ends_at > User.trial_started_at,
+            or_(User.vip_ends_at.is_(None), User.vip_ends_at <= now),
+        ).order_by(User.id).limit(500))).all())
     sent = 0
     for user in users:
         if has_access(user, now):
@@ -140,8 +211,11 @@ async def funnel_scheduler_loop() -> None:
     try:
         while True:
             try:
+                frozen, started = await reconcile_trial_prerequisites()
                 renewed = await process_impaya_renewals()
                 sent = await notify_expired_users(redis)
+                if frozen or started:
+                    logger.info("funnel_trials_reconciled", frozen=frozen, started=started)
                 if renewed:
                     logger.info("impaya_subscriptions_renewed", count=renewed)
                 if sent:
