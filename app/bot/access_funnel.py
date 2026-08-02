@@ -12,7 +12,7 @@ from app.bot.setup import bot
 from app.core.config import get_settings
 from app.db.models import Referral, User
 from app.db.session import SessionLocal
-from app.services.access import access_state
+from app.services.access import access_state, get_monetization_settings
 from app.services.access_funnel import (
     channel_gate_passed,
     check_channel_membership,
@@ -21,7 +21,7 @@ from app.services.access_funnel import (
     redis_client,
     save_funnel_config,
 )
-from app.services.users import activate_trial_after_channel, referral_code, register_or_update_user
+from app.services.users import activate_trial_after_channel, has_active_business, referral_code, register_or_update_user
 
 router = Router(name="access_funnel")
 settings = get_settings()
@@ -34,6 +34,8 @@ EDITABLE_FIELDS = {
     "subscription_text": "Текст требования подписки",
     "subscription_error_text": "Текст ошибки проверки",
     "subscription_success_text": "Текст успешной проверки",
+    "business_required_text": "Текст требования Telegram Business",
+    "trial_started_text": "Текст запуска пробного периода",
     "referral_text": "Текст после окончания trial",
     "referral_started_text": "Текст о переходе друга",
     "referral_bonus_success_text": "Текст начисления бонуса",
@@ -76,6 +78,7 @@ def funnel_admin_keyboard(config) -> InlineKeyboardMarkup:
     return keyboard([
         [InlineKeyboardButton(text=f"{toggle(config.enabled)} Воронка доступа", callback_data="funnel:toggle:enabled")],
         [InlineKeyboardButton(text=f"{toggle(config.channel_required)} Подписка на канал", callback_data="funnel:toggle:channel_required")],
+        [InlineKeyboardButton(text=f"{toggle(config.business_required)} Telegram Business", callback_data="funnel:toggle:business_required")],
         [InlineKeyboardButton(text=f"{toggle(config.referral_required)} Приглашение друга", callback_data="funnel:toggle:referral_required")],
         [InlineKeyboardButton(text=f"{toggle(config.redact_expired_notifications)} Цензура уведомлений", callback_data="funnel:toggle:redact_expired_notifications")],
         [InlineKeyboardButton(text="📢 Канал", callback_data="funnel:fields:channel"), InlineKeyboardButton(text="💳 Оплата", callback_data="funnel:fields:payment")],
@@ -97,33 +100,46 @@ async def show_funnel_admin(message: Message) -> None:
         "<b>🔐 Доступ и воронка</b>\n\n"
         f"Воронка: <b>{'включена' if config.enabled else 'выключена'}</b>\n"
         f"Подписка на канал: <b>{'обязательна' if config.channel_required else 'не требуется'}</b>\n"
+        f"Telegram Business: <b>{'обязателен до запуска trial' if config.business_required else 'не требуется'}</b>\n"
         f"Канал: <b>{config.channel_title or 'не указан'}</b>\n"
         f"ID: <code>{config.channel_id or 'не указан'}</code>\n"
-        f"Оплата: <code>{config.payment_url or 'не указана'}</code>\n\n"
-        "Все этапы можно включать и выключать кнопками. Платёжный провайдер пока не подключён.",
+        f"Оплата: <code>{config.payment_url or 'не указана'}</code>",
         reply_markup=funnel_admin_keyboard(config),
     )
 
 
 async def send_access_screen(message: Message, user: User) -> None:
     config = await get_funnel_config()
-    if config.enabled and config.channel_required and not await channel_gate_passed(
+    channel_ok = not config.channel_required or await channel_gate_passed(
         bot,
         user_id=user.telegram_id,
         config=config,
-    ):
+    )
+    if config.enabled and not channel_ok:
         await message.answer(config.subscription_text, reply_markup=subscription_keyboard(config.channel_url))
         return
 
     async with SessionLocal() as session, session.begin():
         db_user = await session.get(User, user.id, with_for_update=True)
         if db_user:
-            await activate_trial_after_channel(session, user=db_user)
+            started = await activate_trial_after_channel(session, user=db_user)
+            business_connected = await has_active_business(session, db_user.id)
             state = await access_state(session, db_user)
             referral_available = db_user.referral_bonus_granted_at is None
+            monetization = await get_monetization_settings(session)
         else:
+            started = False
+            business_connected = False
             state = await access_state(session, user)
             referral_available = user.referral_bonus_granted_at is None
+            monetization = await get_monetization_settings(session)
+
+    if started:
+        await message.answer(config.trial_started_text.format(days=monetization.trial_days))
+
+    if config.enabled and config.business_required and not business_connected and not state.active:
+        await message.answer(config.business_required_text)
+        return
 
     if config.enabled and not state.active:
         referral_available = config.referral_required and referral_available
@@ -194,12 +210,18 @@ async def check_channel(callback: CallbackQuery) -> None:
         user = await session.scalar(select(User).where(User.telegram_id == callback.from_user.id).with_for_update())
         if user:
             started = await activate_trial_after_channel(session, user=user)
+            business_connected = await has_active_business(session, user.id)
+            monetization = await get_monetization_settings(session)
         else:
             started = False
+            business_connected = False
+            monetization = await get_monetization_settings(session)
     await callback.answer(config.subscription_success_text, show_alert=True)
     if callback.message and user:
         if started:
-            await callback.message.answer("🎉 <b>Доступ активирован</b>\n\nВы получили полный бесплатный доступ к Phantom на пробный период.")
+            await callback.message.answer(config.trial_started_text.format(days=monetization.trial_days))
+        elif config.business_required and not business_connected:
+            await callback.message.answer(config.business_required_text)
         await send_access_screen(callback.message, user)
 
 
@@ -216,9 +238,7 @@ async def invite_friend(callback: CallbackQuery) -> None:
         return
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start=ref_{referral_code(user)}"
-    channel_condition = (
-        "подпишется на информационный канал, " if config.channel_required else ""
-    )
+    channel_condition = "подпишется на информационный канал, " if config.channel_required else ""
     text = (
         "<b>👥 Пригласите друга в Phantom</b>\n\n"
         f"После перехода друг {channel_condition}подключит Telegram Business и начнёт пользоваться Phantom.\n\n"
@@ -250,7 +270,7 @@ async def toggle_setting(callback: CallbackQuery) -> None:
         return
     field = (callback.data or "").split(":", 2)[2]
     config = await get_funnel_config()
-    if field not in {"enabled", "channel_required", "referral_required", "redact_expired_notifications"}:
+    if field not in {"enabled", "channel_required", "business_required", "referral_required", "redact_expired_notifications"}:
         await callback.answer("Неизвестная настройка", show_alert=True)
         return
     updated = await save_funnel_config({field: not getattr(config, field)})
@@ -268,7 +288,7 @@ async def fields(callback: CallbackQuery) -> None:
     groups = {
         "channel": ["channel_id", "channel_url", "channel_title"],
         "payment": ["payment_button_text", "payment_url", "payment_required_text"],
-        "texts": ["subscription_text", "subscription_error_text", "subscription_success_text", "referral_text", "referral_started_text", "referral_bonus_success_text", "referral_share_text"],
+        "texts": ["subscription_text", "subscription_error_text", "subscription_success_text", "business_required_text", "trial_started_text", "referral_text", "referral_started_text", "referral_bonus_success_text", "referral_share_text"],
         "redaction": ["redacted_actor", "redacted_content"],
     }
     rows = [[InlineKeyboardButton(text=EDITABLE_FIELDS[name], callback_data=f"funnel:edit:{name}")] for name in groups.get(group, [])]
