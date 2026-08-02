@@ -31,6 +31,20 @@ class Settings(BaseSettings):
     refresh_token_ttl_days: int = 30
     cors_origins: tuple[str, ...] = ()
 
+    # Impaya is disabled until the test credentials are configured on the server.
+    impaya_enabled: bool = False
+    impaya_test_mode: bool = True
+    impaya_api_url: str = "https://ag-stage.impaya.ru"
+    impaya_payment_form_url: str = "https://payment-stage.impaya.ru"
+    impaya_token: str = ""
+    impaya_terminal_name: str = ""
+    impaya_non3ds_terminal_name: str = ""
+    impaya_invoice_lifetime: int = 1800
+    impaya_return_success_url: str = ""
+    impaya_return_fail_url: str = ""
+    impaya_initial_amount_rub: int = 20
+    impaya_initial_access_days: int = 1
+
     @field_validator("telegram_admin_ids", mode="before")
     @classmethod
     def parse_admin_ids(cls, value: object) -> object:
