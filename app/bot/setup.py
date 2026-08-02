@@ -11,7 +11,6 @@ dispatcher = Dispatcher()
 
 # Specific handlers are registered before generic routers.
 from app.bot.channel_gate_middleware import ChannelGateMiddleware  # noqa: E402
-from app.bot.channel_check_override import router as channel_check_override_router  # noqa: E402
 from app.bot.access_center import router as access_center_router  # noqa: E402
 from app.bot.menu_editor_handlers import router as menu_editor_router  # noqa: E402
 from app.bot.admin_menu_editor_patch import router as admin_menu_editor_router  # noqa: E402
@@ -25,7 +24,7 @@ from app.bot.subscription import subscription_command  # noqa: E402
 from app.bot import profile_card_handlers, user_handlers  # noqa: E402
 from app.bot.enhanced_user_menu import enhanced_user_keyboard  # noqa: E402
 
-# Every non-admin interaction must pass a live informational-channel check.
+# Every user interaction must pass a live informational-channel check.
 dispatcher.message.outer_middleware(ChannelGateMiddleware())
 dispatcher.callback_query.outer_middleware(ChannelGateMiddleware())
 
@@ -40,9 +39,6 @@ dispatcher.message.register(cancel_command, Command("cancel"))
 dispatcher.message.register(subscription_command, Command("subscription"))
 dispatcher.callback_query.register(pay_callback, F.data == "impaya:pay")
 
-# Exact channel verification override must be first. It emits one result screen
-# and prevents the legacy callback from sending the Business requirement twice.
-dispatcher.include_router(channel_check_override_router)
 dispatcher.include_router(access_center_router)
 
 # The access funnel is a user-facing router. It must be attached directly so
