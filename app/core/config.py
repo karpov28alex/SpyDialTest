@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     impaya_return_fail_url: str = ""
     impaya_initial_amount_rub: int = 20
     impaya_initial_access_days: int = 1
+    impaya_renewal_enabled: bool = True
+    impaya_renewal_amount_rub: int = 125
+    impaya_renewal_access_days: int = 7
+    impaya_fallback_enabled: bool = True
+    impaya_fallback_amount_rub: int = 70
+    impaya_fallback_access_days: int = 3
 
     @field_validator("telegram_admin_ids", mode="before")
     @classmethod
