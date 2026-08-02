@@ -16,6 +16,7 @@ from app.api.routes.admin_dialogs import router as admin_dialogs_router
 from app.api.routes.admin_explorer import router as admin_explorer_router
 from app.api.routes.admin_funnel import router as admin_funnel_router
 from app.api.routes.admin_growth import router as admin_growth_router
+from app.api.routes.admin_impaya import router as admin_impaya_router
 from app.api.routes.admin_monetization import router as admin_monetization_router
 from app.api.routes.admin_user360 import router as admin_user360_router
 from app.api.routes.auth import router as auth_router
@@ -106,6 +107,7 @@ app.include_router(admin_analytics_router)
 app.include_router(admin_growth_router)
 app.include_router(admin_user360_router)
 app.include_router(admin_funnel_router)
+app.include_router(admin_impaya_router)
 app.include_router(webhook_router)
 app.include_router(webhook_compat_router)
 
