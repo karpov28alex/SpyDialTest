@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import case, func, select
+from sqlalchemy import String, case, cast, func, select
 
 from app.api.routes.admin import AdminAuth, Session
 from app.db.models import Payment, User
@@ -174,7 +174,7 @@ async def payments(
         query = query.where(
             (Payment.external_id.ilike(term))
             | (User.username.ilike(term))
-            | (func.cast(User.telegram_id, str).ilike(term))
+            | (cast(User.telegram_id, String).ilike(term))
         )
     rows = list((await session.execute(query.order_by(Payment.id.desc()).limit(limit))).all())
     items = [serialize_payment(payment, user) for payment, user in rows]
