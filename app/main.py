@@ -13,6 +13,7 @@ from sqlalchemy import text
 from app.api.routes.access_center import router as access_center_router
 from app.api.routes.admin import router as admin_router
 from app.api.routes.admin_analytics import router as admin_analytics_router
+from app.api.routes.admin_commerce import router as admin_commerce_router
 from app.api.routes.admin_dialogs import router as admin_dialogs_router
 from app.api.routes.admin_explorer import router as admin_explorer_router
 from app.api.routes.admin_funnel import router as admin_funnel_router
@@ -107,6 +108,7 @@ app.include_router(admin_user360_router)
 app.include_router(admin_funnel_router)
 app.include_router(admin_impaya_router)
 app.include_router(admin_platform_router)
+app.include_router(admin_commerce_router)
 app.include_router(webhook_router)
 app.include_router(webhook_compat_router)
 
