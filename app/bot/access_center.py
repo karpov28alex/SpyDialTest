@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import select
 
-from app.bot.setup import bot
 from app.core.config import get_settings
 from app.db.models import User
 from app.db.session import SessionLocal
@@ -87,7 +86,7 @@ def _text(status: dict) -> str:
     return "\n".join(lines)
 
 
-async def _load_status(telegram_id: int) -> dict | None:
+async def _load_status(telegram_id: int, bot: Bot) -> dict | None:
     async with SessionLocal() as session:
         user = await session.scalar(select(User).where(User.telegram_id == telegram_id))
         if not user:
@@ -96,7 +95,7 @@ async def _load_status(telegram_id: int) -> dict | None:
 
 
 async def _send(message: Message, telegram_id: int) -> None:
-    status = await _load_status(telegram_id)
+    status = await _load_status(telegram_id, message.bot)
     if status is None:
         await message.answer("Сначала отправьте /start.")
         return
@@ -111,7 +110,7 @@ async def access_command(message: Message) -> None:
 
 @router.callback_query(F.data == "user:access")
 async def access_callback(callback: CallbackQuery) -> None:
-    status = await _load_status(callback.from_user.id)
+    status = await _load_status(callback.from_user.id, callback.bot)
     if status is None:
         await callback.answer("Сначала отправьте /start", show_alert=True)
         return
