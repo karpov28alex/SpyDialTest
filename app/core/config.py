@@ -31,12 +31,14 @@ class Settings(BaseSettings):
     refresh_token_ttl_days: int = 30
     cors_origins: tuple[str, ...] = ()
 
-    # Impaya test API and hosted payment form use payment-stage.impaya.ru.
+    # Impaya API and hosted payment form are configured independently.
     impaya_enabled: bool = False
     impaya_test_mode: bool = True
-    impaya_api_url: str = "https://payment-stage.impaya.ru"
+    impaya_api_url: str = "https://ag-stage.impaya.ru"
     impaya_payment_form_url: str = "https://payment-stage.impaya.ru"
+    impaya_protocol: str = "v2.0"
     impaya_invoice_path: str = "/invoice"
+    impaya_pay_path: str = "/order/pay"
     impaya_state_path: str = "/order/state"
     impaya_state_extended_path: str = "/order/state/extended"
     impaya_token: str = ""
