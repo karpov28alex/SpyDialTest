@@ -184,11 +184,18 @@ class ImpayaClient:
         terminal_name: str | None = None,
     ) -> dict[str, Any]:
         path = self.settings.impaya_state_extended_path if extended else self.settings.impaya_state_path
+        resolved_terminal = terminal_name
+        if not resolved_terminal:
+            resolved_terminal = (
+                self.settings.impaya_non3ds_terminal_name
+                if "_charge" in customer_operation_id
+                else self.settings.impaya_terminal_name
+            )
         return await self._request(
             "GET",
             path,
             params={
-                "terminal_name": terminal_name or self.settings.impaya_terminal_name,
+                "terminal_name": resolved_terminal,
                 "customer_operation_id": customer_operation_id,
             },
         )
