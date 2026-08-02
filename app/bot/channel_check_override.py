@@ -4,15 +4,16 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery
 from sqlalchemy import select
 
-from app.bot.access_funnel import send_access_screen
-from app.bot.setup import bot
+from app.bot.enhanced_user_menu import enhanced_user_keyboard
 from app.db.models import User
 from app.db.session import SessionLocal
+from app.services.access import access_state, get_monetization_settings
 from app.services.access_funnel import (
     check_channel_membership,
     get_funnel_config,
     mark_channel_verified,
 )
+from app.services.users import activate_trial_after_channel, has_active_business
 
 router = Router(name="channel-check-override")
 
@@ -25,7 +26,7 @@ async def check_channel_once(callback: CallbackQuery) -> None:
         return
 
     ok = await check_channel_membership(
-        bot,
+        callback.bot,
         user_id=callback.from_user.id,
         channel_id=config.channel_id,
     )
@@ -34,12 +35,42 @@ async def check_channel_once(callback: CallbackQuery) -> None:
         return
 
     await mark_channel_verified(callback.from_user.id)
-    async with SessionLocal() as session:
-        user = await session.scalar(select(User).where(User.telegram_id == callback.from_user.id))
+
+    async with SessionLocal() as session, session.begin():
+        user = await session.scalar(
+            select(User)
+            .where(User.telegram_id == callback.from_user.id)
+            .with_for_update()
+        )
+        if not user:
+            await callback.answer("Сначала отправьте /start", show_alert=True)
+            return
+
+        started = await activate_trial_after_channel(session, user=user)
+        business_connected = await has_active_business(session, user.id)
+        state = await access_state(session, user)
+        monetization = await get_monetization_settings(session)
 
     await callback.answer(config.subscription_success_text, show_alert=True)
-    if callback.message and user:
-        # send_access_screen is the single source of the next message. The old
-        # handler used to send business_required_text and then call this method,
-        # causing the same message to appear twice.
-        await send_access_screen(callback.message, user)
+    if not callback.message:
+        return
+
+    if config.business_required and not business_connected and not state.active:
+        await callback.message.answer(config.business_required_text)
+        return
+
+    if started:
+        await callback.message.answer(
+            config.trial_started_text.format(days=monetization.trial_days),
+            reply_markup=enhanced_user_keyboard(),
+        )
+        return
+
+    if state.active:
+        await callback.message.answer(
+            "<b>Phantom</b> — приватный архив Telegram Business.",
+            reply_markup=enhanced_user_keyboard(),
+        )
+        return
+
+    await callback.message.answer(config.payment_required_text)
