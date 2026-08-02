@@ -25,7 +25,10 @@ def enhanced_user_keyboard() -> InlineKeyboardMarkup:
     offer_url, show_offer = _menu_config()
     rows = [
         [InlineKeyboardButton(text="📱 Открыть Mini App", web_app=WebAppInfo(url=settings.mini_app_url))],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="user:stats")],
+        [
+            InlineKeyboardButton(text="📊 Статистика", callback_data="user:stats"),
+            InlineKeyboardButton(text="🔐 Доступ", callback_data="user:access"),
+        ],
         [
             InlineKeyboardButton(text="👤 Профиль", callback_data="user:profile"),
             InlineKeyboardButton(text="⚙️ Настройки", callback_data="user:settings"),
