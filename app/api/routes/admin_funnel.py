@@ -14,12 +14,15 @@ router = APIRouter(prefix="/api/admin/funnel", tags=["admin-funnel"])
 class FunnelPatch(BaseModel):
     enabled: bool | None = None
     channel_required: bool | None = None
+    business_required: bool | None = None
     channel_id: str | None = Field(default=None, max_length=255)
     channel_url: str | None = Field(default=None, max_length=1024)
     channel_title: str | None = Field(default=None, max_length=255)
     subscription_text: str | None = Field(default=None, max_length=8000)
     subscription_error_text: str | None = Field(default=None, max_length=4000)
     subscription_success_text: str | None = Field(default=None, max_length=4000)
+    business_required_text: str | None = Field(default=None, max_length=8000)
+    trial_started_text: str | None = Field(default=None, max_length=8000)
     referral_required: bool | None = None
     referral_text: str | None = Field(default=None, max_length=8000)
     referral_started_text: str | None = Field(default=None, max_length=8000)
@@ -34,10 +37,11 @@ class FunnelPatch(BaseModel):
 
     @field_validator(
         "channel_id", "channel_url", "channel_title", "subscription_text",
-        "subscription_error_text", "subscription_success_text", "referral_text",
-        "referral_started_text", "referral_bonus_success_text", "referral_share_text",
-        "payment_required_text", "payment_button_text", "payment_url",
-        "redacted_actor", "redacted_content", mode="before",
+        "subscription_error_text", "subscription_success_text", "business_required_text",
+        "trial_started_text", "referral_text", "referral_started_text",
+        "referral_bonus_success_text", "referral_share_text", "payment_required_text",
+        "payment_button_text", "payment_url", "redacted_actor", "redacted_content",
+        mode="before",
     )
     @classmethod
     def normalize_strings(cls, value):
