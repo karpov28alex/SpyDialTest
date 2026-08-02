@@ -80,11 +80,6 @@ async def synchronize_trial_access(
     channel_verified: bool,
     now: datetime | None = None,
 ) -> bool:
-    """Keep trial pending until all enabled prerequisites are satisfied.
-
-    Returns True only when a new trial period was started in this call.
-    Paid/VIP and referral access are never reset.
-    """
     now = now or datetime.now(UTC)
     funnel = await get_funnel_config()
     monetization = await get_monetization_settings(session)
@@ -101,9 +96,6 @@ async def synchronize_trial_access(
     business_ready = (not funnel.business_required) or business_connected
     prerequisites_ready = channel_ready and business_ready
 
-    # Existing users may have received a trial before the Business prerequisite
-    # was introduced. Freeze that free trial and restart it only after both
-    # prerequisites are fulfilled. Naturally expired trials are not restarted.
     active_free_trial = (
         user.subscription_status == SubscriptionStatus.trial
         and user.trial_ends_at > now
@@ -116,9 +108,6 @@ async def synchronize_trial_access(
             await session.flush()
         return False
 
-    # A pending trial is represented by equal start/end timestamps. A trial
-    # that has already run has trial_ends_at > trial_started_at and must not be
-    # granted again after natural expiration.
     is_pending = user.trial_ends_at <= user.trial_started_at
     if not is_pending:
         return False
@@ -144,19 +133,30 @@ async def activate_trial_after_channel(
     )
 
 
-async def activate_business_trial(
-    session: AsyncSession,
-    *,
-    user: User,
-    channel_verified: bool,
-    now: datetime | None = None,
-) -> bool:
-    return await synchronize_trial_access(
-        session,
-        user=user,
-        channel_verified=channel_verified,
-        now=now,
-    )
+def activate_business_trial(*args, **kwargs):
+    """Compatibility adapter for old and new Business-connection callers.
+
+    Old code called ``activate_business_trial(user, now)`` synchronously. That
+    call now safely leaves the trial pending; the next verified bot/Mini App
+    access starts it. New code may await the returned coroutine with
+    ``session=..., user=..., channel_verified=...``.
+    """
+    if args and isinstance(args[0], User):
+        return False
+
+    async def _activate() -> bool:
+        session: AsyncSession = kwargs["session"]
+        user: User = kwargs["user"]
+        channel_verified: bool = bool(kwargs.get("channel_verified"))
+        now: datetime | None = kwargs.get("now")
+        return await synchronize_trial_access(
+            session,
+            user=user,
+            channel_verified=channel_verified,
+            now=now,
+        )
+
+    return _activate()
 
 
 def referral_code(user: User) -> str:
