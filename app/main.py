@@ -27,6 +27,7 @@ from app.api.routes.webhook import router as webhook_router
 from app.api.routes.webhook_compat import router as webhook_compat_router
 from app.bot import access_funnel as access_funnel_module
 from app.bot import admin_console as admin_console_module
+from app.bot.impaya import router as impaya_bot_router
 from app.bot.setup import dispatcher
 from app.bot.user_intelligence import router as user_intelligence_bot_router
 from app.core.config import get_settings
@@ -36,6 +37,7 @@ from app.services.funnel_scheduler import funnel_scheduler_loop
 
 settings = get_settings()
 configure_logging()
+dispatcher.include_router(impaya_bot_router)
 dispatcher.include_router(user_intelligence_bot_router)
 
 _original_user_menu = admin_console_module.user_menu
@@ -50,8 +52,28 @@ def _user_menu_with_stats(admin: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _expired_keyboard_with_impaya(
+    payment_url: str,
+    payment_button_text: str,
+    referral_available: bool = True,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if referral_available:
+        rows.append(
+            [InlineKeyboardButton(text="👥 Пригласить друга", callback_data="funnel:invite")]
+        )
+    if settings.impaya_enabled:
+        rows.append(
+            [InlineKeyboardButton(text=payment_button_text, callback_data="impaya:pay")]
+        )
+    elif payment_url.startswith("https://"):
+        rows.append([InlineKeyboardButton(text=payment_button_text, url=payment_url)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 admin_console_module.user_menu = _user_menu_with_stats
 access_funnel_module.user_menu = _user_menu_with_stats
+access_funnel_module.expired_keyboard = _expired_keyboard_with_impaya
 
 
 @asynccontextmanager
