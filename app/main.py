@@ -27,7 +27,6 @@ from app.api.routes.webhook import router as webhook_router
 from app.api.routes.webhook_compat import router as webhook_compat_router
 from app.bot import access_funnel as access_funnel_module
 from app.bot import admin_console as admin_console_module
-from app.bot.impaya import router as impaya_bot_router
 from app.bot.setup import dispatcher
 from app.bot.user_intelligence import router as user_intelligence_bot_router
 from app.core.config import get_settings
@@ -37,7 +36,6 @@ from app.services.funnel_scheduler import funnel_scheduler_loop
 
 settings = get_settings()
 configure_logging()
-dispatcher.include_router(impaya_bot_router)
 dispatcher.include_router(user_intelligence_bot_router)
 
 _original_user_menu = admin_console_module.user_menu
