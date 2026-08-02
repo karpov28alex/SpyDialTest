@@ -37,6 +37,7 @@ class ImpayaClient:
             "Authorization": f"Bearer {self.settings.impaya_token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "protocol": self.settings.impaya_protocol,
         }
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
@@ -44,12 +45,7 @@ class ImpayaClient:
         url = f"{self.api_url}{normalized_path}"
         try:
             async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
-                response = await client.request(
-                    method,
-                    url,
-                    headers=self._headers(),
-                    **kwargs,
-                )
+                response = await client.request(method, url, headers=self._headers(), **kwargs)
         except httpx.HTTPError as exc:
             raise ImpayaError(f"Impaya connection error for {url}: {exc}") from exc
 
@@ -68,9 +64,13 @@ class ImpayaClient:
             ) from exc
 
         if response.status_code >= 400:
+            error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
             raise ImpayaError(
-                payload.get("error_message") or payload.get("message") or f"Impaya request failed ({response.status_code})",
-                code=payload.get("error_code"),
+                payload.get("error_message")
+                or payload.get("message")
+                or error.get("message")
+                or f"Impaya request failed ({response.status_code})",
+                code=payload.get("error_code") or error.get("code"),
                 payload={**payload, "status_code": response.status_code, "url": url},
             )
         if payload.get("success") is False:
@@ -94,31 +94,32 @@ class ImpayaClient:
             raise ImpayaError("IMPAYA_TERMINAL_NAME is not configured")
 
         amount_minor = int(amount_rub) * 100
-        title = "VIP-доступ Phantom на 1 день"
         body = {
-            "action": "pay",
+            "action": "authorize",
             "amount": amount_minor,
             "customer_operation_id": customer_operation_id,
-            "description": title,
-            "custom_params": f'{{"telegram_id":{telegram_id},"kind":"initial"}}',
             "customization_form": {
-                "title": "Подписка Phantom",
-                "button_label": f"Оплатить {amount_rub} ₽",
+                "button_label": f"Привязать карту за {amount_rub} ₽",
             },
             "goods": [
                 {
-                    "name": title,
+                    "name": "Привязка карты",
                     "price": amount_minor,
-                    "quantity": 1,
                     "tax": 6,
                     "payment_subject_type": 4,
                     "payment_method_type": 4,
                     "agent_type": 0,
+                    "supplier": {
+                        "name": "",
+                        "inn": "",
+                        "phone_numbers": None,
+                    },
+                    "quantity": 1,
                 }
             ],
             "lifetime": self.settings.impaya_invoice_lifetime,
-            "merchant_user_id": f"tg_{telegram_id}",
             "payment_option_action": "bind_recurrent",
+            "post_action": "void",
             "preferred_payment_option": {
                 "card": {
                     "routing": "hard",
@@ -142,17 +143,42 @@ class ImpayaClient:
             raw=payload,
         )
 
+    async def recurrent_pay(
+        self,
+        *,
+        customer_operation_id: str,
+        amount_rub: int,
+        binding_id: str,
+        impaya_user_id: str,
+        merchant_user_id: str,
+        description: str,
+    ) -> dict[str, Any]:
+        amount_minor = int(amount_rub) * 100
+        body = {
+            "amount": amount_minor,
+            "customer_operation_id": customer_operation_id,
+            "description": description,
+            "terminal_name": self.settings.impaya_terminal_name,
+            "merchant_user_id": merchant_user_id,
+            "is_recurrent": True,
+            "payment_initiator": "MIT",
+            "payment_option_data": {
+                "impaya_pay": {
+                    "binding_id": binding_id,
+                    "user_id": impaya_user_id,
+                    "merchant_user_id": merchant_user_id,
+                }
+            },
+        }
+        return await self._request("POST", self.settings.impaya_pay_path, json=body)
+
     async def transaction_state(
         self,
         *,
         customer_operation_id: str,
         extended: bool = False,
     ) -> dict[str, Any]:
-        path = (
-            self.settings.impaya_state_extended_path
-            if extended
-            else self.settings.impaya_state_path
-        )
+        path = self.settings.impaya_state_extended_path if extended else self.settings.impaya_state_path
         return await self._request(
             "GET",
             path,
@@ -166,14 +192,28 @@ class ImpayaClient:
         return f"{self.payment_form_url}/{invoice_id}"
 
 
-def successful_state(payload: dict[str, Any]) -> bool:
+def transaction_state_name(payload: dict[str, Any]) -> str:
     state = payload.get("state")
     if not state and isinstance(payload.get("transaction"), dict):
         state = payload["transaction"].get("state")
-    return str(state or "").upper() in {
+    return str(state or "").strip()
+
+
+def successful_state(payload: dict[str, Any]) -> bool:
+    return transaction_state_name(payload).upper() in {
         "COMPLETED",
         "CONFIRMED",
         "CAPTURED",
         "PAID",
         "SUCCESS",
     }
+
+
+def binding_created(payload: dict[str, Any]) -> bool:
+    binding = payload.get("binding")
+    return bool(
+        isinstance(binding, dict)
+        and binding.get("created")
+        and binding.get("binding_id")
+        and binding.get("user_id")
+    )
