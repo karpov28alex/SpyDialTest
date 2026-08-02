@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from redis.asyncio import Redis
 from sqlalchemy import text
 
+from app.api.routes.access_center import router as access_center_router
 from app.api.routes.admin import router as admin_router
 from app.api.routes.admin_analytics import router as admin_analytics_router
 from app.api.routes.admin_dialogs import router as admin_dialogs_router
@@ -47,9 +48,12 @@ _original_user_menu = admin_console_module.user_menu
 def _user_menu_with_stats(admin: bool) -> InlineKeyboardMarkup:
     original = _original_user_menu(admin)
     rows = [list(row) for row in original.inline_keyboard]
-    stats_row = [InlineKeyboardButton(text="📊 Статистика", callback_data="intel:summary")]
+    status_row = [
+        InlineKeyboardButton(text="📊 Статистика", callback_data="intel:summary"),
+        InlineKeyboardButton(text="🔐 Доступ", callback_data="user:access"),
+    ]
     insert_at = 1 if rows else 0
-    rows.insert(insert_at, stats_row)
+    rows.insert(insert_at, status_row)
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -86,6 +90,7 @@ app = FastAPI(title="Dialog Spy API", version=settings.app_version, lifespan=lif
 app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_credentials=True, allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"], allow_headers=["Authorization", "Content-Type", "X-Correlation-ID"])
 app.include_router(auth_router)
 app.include_router(user_router)
+app.include_router(access_center_router)
 app.include_router(user_intelligence_router)
 app.include_router(impaya_db_pricing_router)
 app.include_router(impaya_router)
