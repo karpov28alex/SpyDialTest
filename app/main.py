@@ -21,6 +21,7 @@ from app.api.routes.admin_user360 import router as admin_user360_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.avatar import router as avatar_router
 from app.api.routes.impaya import router as impaya_router
+from app.api.routes.subscription import router as subscription_router
 from app.api.routes.user import router as user_router
 from app.api.routes.user_intelligence import router as user_intelligence_router
 from app.api.routes.webhook import router as webhook_router
@@ -57,13 +58,9 @@ def _expired_keyboard_with_impaya(
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if referral_available:
-        rows.append(
-            [InlineKeyboardButton(text="👥 Пригласить друга", callback_data="funnel:invite")]
-        )
+        rows.append([InlineKeyboardButton(text="👥 Пригласить друга", callback_data="funnel:invite")])
     if settings.impaya_enabled:
-        rows.append(
-            [InlineKeyboardButton(text=payment_button_text, callback_data="impaya:pay")]
-        )
+        rows.append([InlineKeyboardButton(text=payment_button_text, callback_data="impaya:pay")])
     elif payment_url.startswith("https://"):
         rows.append([InlineKeyboardButton(text=payment_button_text, url=payment_url)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -99,6 +96,7 @@ app.include_router(auth_router)
 app.include_router(user_router)
 app.include_router(user_intelligence_router)
 app.include_router(impaya_router)
+app.include_router(subscription_router)
 app.include_router(avatar_router)
 app.include_router(admin_dialogs_router)
 app.include_router(admin_router)
@@ -124,17 +122,7 @@ async def correlation_middleware(request: Request, call_next):
 
 @app.exception_handler(Exception)
 async def unhandled_error(request: Request, _: Exception) -> JSONResponse:
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": {
-                "code": "INTERNAL_ERROR",
-                "message": "Внутренняя ошибка",
-                "details": {},
-                "correlation_id": request.headers.get("x-correlation-id", "unknown"),
-            }
-        },
-    )
+    return JSONResponse(status_code=500, content={"error": {"code": "INTERNAL_ERROR", "message": "Внутренняя ошибка", "details": {}, "correlation_id": request.headers.get("x-correlation-id", "unknown")}})
 
 
 @app.get("/health/live")
@@ -159,20 +147,12 @@ async def mini_app() -> FileResponse:
 
 @app.get("/app/app.js", include_in_schema=False)
 async def mini_app_js() -> FileResponse:
-    return FileResponse(
-        "app/static/miniapp/app.js",
-        media_type="application/javascript",
-        headers={"Cache-Control": "no-store"},
-    )
+    return FileResponse("app/static/miniapp/app.js", media_type="application/javascript", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/app/style.css", include_in_schema=False)
 async def mini_app_css() -> FileResponse:
-    return FileResponse(
-        "app/static/miniapp/style.css",
-        media_type="text/css",
-        headers={"Cache-Control": "no-store"},
-    )
+    return FileResponse("app/static/miniapp/style.css", media_type="text/css", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/app/{asset_path:path}", include_in_schema=False)
