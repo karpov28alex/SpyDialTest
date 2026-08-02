@@ -32,11 +32,11 @@ async def register_or_update_user(
     user = await session.scalar(select(User).where(User.telegram_id == telegram_id).with_for_update())
     created = user is None
     if user is None:
-        trial_pending = funnel.enabled and funnel.channel_required
-        trial_end = now if trial_pending else (
+        prerequisites_pending = funnel.enabled and (funnel.channel_required or funnel.business_required)
+        trial_end = now if prerequisites_pending else (
             now + timedelta(days=config.trial_days) if config.free_trial_enabled else now
         )
-        status = SubscriptionStatus.expired if trial_pending or not config.free_trial_enabled else SubscriptionStatus.trial
+        status = SubscriptionStatus.expired if prerequisites_pending or not config.free_trial_enabled else SubscriptionStatus.trial
         user = User(
             telegram_id=telegram_id,
             username=username,
@@ -63,27 +63,100 @@ async def register_or_update_user(
     return user, created
 
 
+async def has_active_business(session: AsyncSession, user_id: int) -> bool:
+    count = await session.scalar(
+        select(func.count(BusinessConnection.id)).where(
+            BusinessConnection.owner_user_id == user_id,
+            BusinessConnection.is_active.is_(True),
+        )
+    )
+    return bool(count)
+
+
+async def synchronize_trial_access(
+    session: AsyncSession,
+    *,
+    user: User,
+    channel_verified: bool,
+    now: datetime | None = None,
+) -> bool:
+    """Keep trial pending until all enabled prerequisites are satisfied.
+
+    Returns True only when a new trial period was started in this call.
+    Paid/VIP and referral access are never reset.
+    """
+    now = now or datetime.now(UTC)
+    funnel = await get_funnel_config()
+    monetization = await get_monetization_settings(session)
+
+    if not funnel.enabled:
+        return False
+    if user.vip_ends_at and user.vip_ends_at > now:
+        return False
+    if user.referral_bonus_granted_at is not None:
+        return False
+
+    business_connected = await has_active_business(session, user.id)
+    channel_ready = (not funnel.channel_required) or channel_verified
+    business_ready = (not funnel.business_required) or business_connected
+    prerequisites_ready = channel_ready and business_ready
+
+    # Existing users may have received a trial before the Business prerequisite
+    # was introduced. Freeze that free trial and restart it only after both
+    # prerequisites are fulfilled. Naturally expired trials are not restarted.
+    active_free_trial = (
+        user.subscription_status == SubscriptionStatus.trial
+        and user.trial_ends_at > now
+    )
+    if not prerequisites_ready:
+        if active_free_trial:
+            user.trial_started_at = now
+            user.trial_ends_at = now
+            user.subscription_status = SubscriptionStatus.expired
+            await session.flush()
+        return False
+
+    # A pending trial is represented by equal start/end timestamps. A trial
+    # that has already run has trial_ends_at > trial_started_at and must not be
+    # granted again after natural expiration.
+    is_pending = user.trial_ends_at <= user.trial_started_at
+    if not is_pending:
+        return False
+
+    user.trial_started_at = now
+    user.trial_ends_at = now + timedelta(days=monetization.trial_days) if monetization.free_trial_enabled else now
+    user.subscription_status = SubscriptionStatus.trial if monetization.free_trial_enabled else SubscriptionStatus.expired
+    await session.flush()
+    return monetization.free_trial_enabled
+
+
 async def activate_trial_after_channel(
     session: AsyncSession,
     *,
     user: User,
     now: datetime | None = None,
 ) -> bool:
-    now = now or datetime.now(UTC)
-    if user.trial_ends_at > user.trial_started_at:
-        return False
-    if user.referral_bonus_granted_at is not None or user.vip_ends_at:
-        return False
-    config = await get_monetization_settings(session)
-    user.trial_started_at = now
-    user.trial_ends_at = now + timedelta(days=config.trial_days) if config.free_trial_enabled else now
-    user.subscription_status = SubscriptionStatus.trial if config.free_trial_enabled else SubscriptionStatus.expired
-    await session.flush()
-    return config.free_trial_enabled
+    return await synchronize_trial_access(
+        session,
+        user=user,
+        channel_verified=True,
+        now=now,
+    )
 
 
-def activate_business_trial(user: User, now: datetime | None = None) -> bool:
-    return False
+async def activate_business_trial(
+    session: AsyncSession,
+    *,
+    user: User,
+    channel_verified: bool,
+    now: datetime | None = None,
+) -> bool:
+    return await synchronize_trial_access(
+        session,
+        user=user,
+        channel_verified=channel_verified,
+        now=now,
+    )
 
 
 def referral_code(user: User) -> str:
