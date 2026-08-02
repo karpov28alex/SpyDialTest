@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from aiogram.filters import Command
 from aiogram.types import Message
 from sqlalchemy import select
 
@@ -10,14 +9,35 @@ from app.db.models import Payment, User
 from app.db.session import SessionLocal
 
 
+def _payment_payload(payment: Payment | None) -> dict:
+    return payment.payload if payment and isinstance(payment.payload, dict) else {}
+
+
+def _card_from_payload(payload: dict) -> dict:
+    card = payload.get("card")
+    if isinstance(card, dict) and card.get("pan_mask"):
+        return card
+
+    binding_state = payload.get("binding_state")
+    if isinstance(binding_state, dict):
+        payment_option = binding_state.get("payment_option")
+        if isinstance(payment_option, dict):
+            nested_card = payment_option.get("card")
+            if isinstance(nested_card, dict):
+                return nested_card
+    return {}
+
+
 async def subscription_command(message: Message) -> None:
     if not message.from_user:
         return
+
     async with SessionLocal() as session:
         user = await session.scalar(select(User).where(User.telegram_id == message.from_user.id))
         if not user:
             await message.answer("Сначала отправьте /start.")
             return
+
         payments = list((await session.scalars(
             select(Payment)
             .where(
@@ -28,9 +48,9 @@ async def subscription_command(message: Message) -> None:
             .order_by(Payment.id.desc())
         )).all())
 
-    source = None
+    source: Payment | None = None
     for payment in payments:
-        payload = payment.payload if isinstance(payment.payload, dict) else {}
+        payload = _payment_payload(payment)
         if payload.get("binding_id") and payload.get("impaya_user_id"):
             source = payment
             break
@@ -41,13 +61,15 @@ async def subscription_command(message: Message) -> None:
         await message.answer("Актуальной подписки не найдено.")
         return
 
-    payload = source.payload if source and isinstance(source.payload, dict) else {}
-    card = payload.get("card") if isinstance(payload.get("card"), dict) else {}
+    payload = _payment_payload(source)
+    card = _card_from_payload(payload)
     auto_renew = bool(source and payload.get("auto_renew") is not False)
+
     card_line = card.get("pan_mask") or "не привязана"
     bank = card.get("bank_name")
     if bank and card_line != "не привязана":
         card_line = f"{card_line} · {bank}"
+
     until = user.vip_ends_at.strftime("%d.%m.%Y · %H:%M UTC") if user.vip_ends_at else "не определена"
     next_charge = until if active and auto_renew else "не запланировано"
 
