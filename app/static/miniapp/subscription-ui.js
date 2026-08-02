@@ -5,6 +5,45 @@ function paymentHref(root) {
   return link?.href || 'https://game.hidenow.su';
 }
 
+function polishChannelGate(root) {
+  const cards = [...root.querySelectorAll('main.page .settings-card')];
+  const section = cards.find(card => card.querySelector('h3')?.textContent?.includes('Подпишитесь на канал'));
+  if (!section || section.dataset.channelGatePolished === '1') return;
+
+  const channelLink = section.querySelector('a[href]')?.href || '#';
+  section.dataset.channelGatePolished = '1';
+  section.className = 'channel-gate-card';
+  section.innerHTML = `
+    <div class="channel-gate-card__glow" aria-hidden="true"></div>
+    <div class="channel-gate-card__content">
+      <div class="channel-gate-title">
+        <span class="channel-gate-title__icon" aria-hidden="true">📣</span>
+        <h2>Подпишитесь на канал</h2>
+      </div>
+      <p class="channel-gate-lead">Для работы с Phantom необходимо быть подписанным на наш информационный канал.</p>
+      <div class="channel-gate-divider"></div>
+      <div class="channel-gate-points">
+        <div class="channel-gate-point"><span>▣</span><p>Здесь мы публикуем новости, обновления и важные уведомления.</p></div>
+        <div class="channel-gate-point"><span>♢</span><p>Подписка обязательна для использования бота и Mini App.</p></div>
+        <div class="channel-gate-point"><span>▣</span><p>После подписки нажмите «Проверить подписку».</p></div>
+      </div>
+      <div class="channel-gate-actions">
+        <a class="channel-gate-button channel-gate-button--primary" href="${channelLink}" target="_blank" rel="noopener noreferrer">
+          <span aria-hidden="true">➤</span> Открыть канал
+        </a>
+        <button class="channel-gate-button channel-gate-button--secondary" type="button" data-retry>
+          <span aria-hidden="true">✓</span> Проверить подписку
+        </button>
+      </div>
+    </div>
+  `;
+
+  const main = section.closest('main.page');
+  if (main && !main.querySelector('.channel-gate-note')) {
+    main.insertAdjacentHTML('beforeend', '<p class="channel-gate-note">♢ Мы не рассылаем спам и не передаём данные третьим лицам.</p>');
+  }
+}
+
 function polishProfile(root) {
   const button = root.querySelector('[data-go="subscription"]');
   if (!button) return;
@@ -42,6 +81,7 @@ function polishSubscription(root) {
 
 function polish() {
   if (!appRoot) return;
+  polishChannelGate(appRoot);
   polishProfile(appRoot);
   polishSubscription(appRoot);
 }
