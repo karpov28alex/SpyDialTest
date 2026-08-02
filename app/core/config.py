@@ -31,10 +31,10 @@ class Settings(BaseSettings):
     refresh_token_ttl_days: int = 30
     cors_origins: tuple[str, ...] = ()
 
-    # Impaya is disabled until the test credentials are configured on the server.
+    # Impaya test API and hosted payment form use payment-stage.impaya.ru.
     impaya_enabled: bool = False
     impaya_test_mode: bool = True
-    impaya_api_url: str = "https://ag-stage.impaya.ru"
+    impaya_api_url: str = "https://payment-stage.impaya.ru"
     impaya_payment_form_url: str = "https://payment-stage.impaya.ru"
     impaya_invoice_path: str = "/invoice"
     impaya_state_path: str = "/order/state"
