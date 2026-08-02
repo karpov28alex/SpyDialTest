@@ -36,7 +36,7 @@ async def help_callback(callback: CallbackQuery) -> None:
 
 
 KNOWN_COMMANDS = {
-    "start", "menu", "profile", "settings", "stats", "help", "app",
+    "start", "menu", "profile", "settings", "stats", "help", "app", "access",
     "admin", "admin_id", "admin_add", "admin_remove", "admins",
     "broadcast", "menu_editor", "instruction_text", "instruction_video1",
     "instruction_video2", "instruction_clear", "subscription", "cancel",
