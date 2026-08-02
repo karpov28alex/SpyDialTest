@@ -21,6 +21,7 @@ from app.api.routes.admin_monetization import router as admin_monetization_route
 from app.api.routes.admin_user360 import router as admin_user360_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.avatar import router as avatar_router
+from app.api.routes.impaya_db_pricing import router as impaya_db_pricing_router
 from app.api.routes.impaya import router as impaya_router
 from app.api.routes.subscription import router as subscription_router
 from app.api.routes.user import router as user_router
@@ -52,11 +53,7 @@ def _user_menu_with_stats(admin: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _expired_keyboard_with_impaya(
-    payment_url: str,
-    payment_button_text: str,
-    referral_available: bool = True,
-) -> InlineKeyboardMarkup:
+def _expired_keyboard_with_impaya(payment_url: str, payment_button_text: str, referral_available: bool = True) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if referral_available:
         rows.append([InlineKeyboardButton(text="👥 Пригласить друга", callback_data="funnel:invite")])
@@ -86,16 +83,11 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Dialog Spy API", version=settings.app_version, lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=list(settings.cors_origins),
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
-    allow_headers=["Authorization", "Content-Type", "X-Correlation-ID"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_credentials=True, allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"], allow_headers=["Authorization", "Content-Type", "X-Correlation-ID"])
 app.include_router(auth_router)
 app.include_router(user_router)
 app.include_router(user_intelligence_router)
+app.include_router(impaya_db_pricing_router)
 app.include_router(impaya_router)
 app.include_router(subscription_router)
 app.include_router(avatar_router)
