@@ -21,6 +21,7 @@ CHANNEL_VERIFIED_PREFIX = "phantom:access_funnel:channel_verified:"
 class FunnelConfig:
     enabled: bool = True
     channel_required: bool = True
+    business_required: bool = True
     channel_id: str = ""
     channel_url: str = ""
     channel_title: str = "Официальный канал Phantom"
@@ -32,7 +33,17 @@ class FunnelConfig:
         "Подписка пока не найдена. Подпишитесь на канал и повторите проверку."
     )
     subscription_success_text: str = (
-        "✅ Подписка подтверждена. Ваш бесплатный доступ активирован."
+        "✅ Подписка подтверждена. Теперь подключите Phantom в Telegram Business — после подключения начнётся пробный период."
+    )
+    business_required_text: str = (
+        "<b>Подключите Phantom к Telegram Business</b>\n\n"
+        "Пробный период начнётся только после активного подключения бота к бизнес-чатам. "
+        "До подключения дни бесплатного доступа не расходуются."
+    )
+    trial_started_text: str = (
+        "🎉 <b>Пробный период начался</b>\n\n"
+        "Подписка на канал подтверждена, Telegram Business подключён. "
+        "Полный доступ активирован на <b>{days} дня</b>."
     )
     referral_required: bool = True
     referral_text: str = (
