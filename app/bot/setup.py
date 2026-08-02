@@ -17,7 +17,6 @@ from app.bot.profile_card_handlers import router as profile_card_router  # noqa:
 from app.bot.statistics_card_v2_handlers import router as statistics_card_router  # noqa: E402
 from app.bot.user_experience_handlers import router as user_experience_router  # noqa: E402
 from app.bot.archive_handlers import router as archive_router  # noqa: E402
-from app.bot.access_funnel import router as access_funnel_router  # noqa: E402
 from app.bot.impaya import cancel_command, pay_callback, pay_command  # noqa: E402
 from app.bot.subscription import subscription_command  # noqa: E402
 from app.bot import profile_card_handlers, user_handlers  # noqa: E402
@@ -38,7 +37,8 @@ dispatcher.message.register(cancel_command, Command("cancel"))
 dispatcher.message.register(subscription_command, Command("subscription"))
 dispatcher.callback_query.register(pay_callback, F.data == "impaya:pay")
 
-dispatcher.include_router(access_funnel_router)
+# The access-funnel router is nested under app.bot.admin_handlers and is attached
+# to the dispatcher later by the webhook module. Do not attach it here as well.
 dispatcher.include_router(menu_editor_router)
 dispatcher.include_router(admin_menu_editor_router)
 dispatcher.include_router(statistics_card_router)
