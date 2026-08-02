@@ -17,6 +17,7 @@ from app.bot.statistics_card_v2_handlers import router as statistics_card_router
 from app.bot.user_experience_handlers import router as user_experience_router  # noqa: E402
 from app.bot.archive_handlers import router as archive_router  # noqa: E402
 from app.bot.impaya import cancel_command, pay_callback, pay_command  # noqa: E402
+from app.bot.subscription import subscription_command  # noqa: E402
 from app.bot import profile_card_handlers, user_handlers  # noqa: E402
 from app.bot.enhanced_user_menu import enhanced_user_keyboard  # noqa: E402
 
@@ -28,6 +29,7 @@ profile_card_handlers._profile_keyboard = enhanced_user_keyboard
 # callbacks cannot be shadowed by any generic router included below.
 dispatcher.message.register(pay_command, Command("pay"))
 dispatcher.message.register(cancel_command, Command("cancel"))
+dispatcher.message.register(subscription_command, Command("subscription"))
 dispatcher.callback_query.register(pay_callback, F.data == "impaya:pay")
 
 dispatcher.include_router(menu_editor_router)
