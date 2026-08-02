@@ -40,35 +40,44 @@ class ImpayaClient:
         }
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        normalized_path = path if path.startswith("/") else f"/{path}"
+        url = f"{self.api_url}{normalized_path}"
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
                 response = await client.request(
                     method,
-                    f"{self.api_url}{path}",
+                    url,
                     headers=self._headers(),
                     **kwargs,
                 )
         except httpx.HTTPError as exc:
-            raise ImpayaError(f"Impaya connection error: {exc}") from exc
+            raise ImpayaError(f"Impaya connection error for {url}: {exc}") from exc
 
+        response_text = response.text[:1000]
         try:
             payload = response.json()
         except ValueError as exc:
             raise ImpayaError(
-                f"Impaya returned non-JSON response ({response.status_code})"
+                f"Impaya returned non-JSON response ({response.status_code}) for {url}: {response_text!r}",
+                payload={
+                    "status_code": response.status_code,
+                    "url": url,
+                    "body": response_text,
+                    "location": response.headers.get("location"),
+                },
             ) from exc
 
         if response.status_code >= 400:
             raise ImpayaError(
-                payload.get("error_message") or payload.get("message") or "Impaya request failed",
+                payload.get("error_message") or payload.get("message") or f"Impaya request failed ({response.status_code})",
                 code=payload.get("error_code"),
-                payload=payload,
+                payload={**payload, "status_code": response.status_code, "url": url},
             )
         if payload.get("success") is False:
             raise ImpayaError(
                 payload.get("error_message") or payload.get("message") or "Impaya operation failed",
                 code=payload.get("error_code"),
-                payload=payload,
+                payload={**payload, "status_code": response.status_code, "url": url},
             )
         return payload
 
@@ -121,7 +130,7 @@ class ImpayaClient:
                 "fail_redirect_url": fail_url,
             },
         }
-        payload = await self._request("POST", "/invoice", json=body)
+        payload = await self._request("POST", self.settings.impaya_invoice_path, json=body)
         invoice_id = payload.get("invoice_id")
         if not invoice_id:
             raise ImpayaError("Impaya did not return invoice_id", payload=payload)
@@ -139,7 +148,11 @@ class ImpayaClient:
         customer_operation_id: str,
         extended: bool = False,
     ) -> dict[str, Any]:
-        path = "/order/state/extended" if extended else "/order/state"
+        path = (
+            self.settings.impaya_state_extended_path
+            if extended
+            else self.settings.impaya_state_path
+        )
         return await self._request(
             "GET",
             path,
