@@ -9,6 +9,22 @@ from app.bot.handlers import is_admin
 from app.services.access_funnel import channel_gate_passed, get_funnel_config
 
 
+ADMIN_COMMANDS = {
+    "/admin",
+    "/admin_id",
+    "/admins",
+    "/broadcast",
+}
+ADMIN_CALLBACK_PREFIXES = (
+    "crm:",
+    "admin:",
+    "funnel:admin",
+    "funnel:toggle:",
+    "funnel:fields:",
+    "funnel:edit:",
+)
+
+
 def _subscription_keyboard(channel_url: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if channel_url.startswith("https://"):
@@ -17,12 +33,31 @@ def _subscription_keyboard(channel_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _message_command(event: Message) -> str:
+    text = (event.text or "").strip()
+    if not text.startswith("/"):
+        return ""
+    return text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+
+
+def _is_admin_control(event: TelegramObject) -> bool:
+    """Allow admin bypass only inside the administrative control plane."""
+    if isinstance(event, Message):
+        return _message_command(event) in ADMIN_COMMANDS
+    if isinstance(event, CallbackQuery):
+        callback_data = event.data or ""
+        return callback_data.startswith(ADMIN_CALLBACK_PREFIXES)
+    return False
+
+
 class ChannelGateMiddleware(BaseMiddleware):
     """Require a live channel membership check for every user interaction.
 
-    Administrators and the funnel's own verification/admin callbacks are exempt.
-    /start is allowed through so registration and referral attribution still run;
-    its handler performs the same channel check before showing the user menu.
+    `/start` is allowed through so registration and referral attribution still
+    run; its handler performs the same channel check before showing the menu.
+    The verification callback is allowed through. Administrators bypass the
+    gate only for admin commands and admin-panel callbacks, not for ordinary
+    user buttons such as Profile, Statistics, Settings, or Archive.
     """
 
     async def __call__(
@@ -33,17 +68,18 @@ class ChannelGateMiddleware(BaseMiddleware):
     ) -> Any:
         user = data.get("event_from_user")
         user_id = getattr(user, "id", None)
-        if user_id is None or await is_admin(user_id):
+        if user_id is None:
             return await handler(event, data)
 
         if isinstance(event, Message):
-            text = (event.text or "").strip()
-            if text.startswith("/start"):
+            if _message_command(event) == "/start":
                 return await handler(event, data)
         elif isinstance(event, CallbackQuery):
-            callback_data = event.data or ""
-            if callback_data == "funnel:check_channel" or callback_data.startswith("funnel:admin"):
+            if (event.data or "") == "funnel:check_channel":
                 return await handler(event, data)
+
+        if _is_admin_control(event) and await is_admin(user_id):
+            return await handler(event, data)
 
         config = await get_funnel_config()
         if not config.enabled or not config.channel_required:
