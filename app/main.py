@@ -21,6 +21,7 @@ from app.api.routes.admin_growth import router as admin_growth_router
 from app.api.routes.admin_impaya import router as admin_impaya_router
 from app.api.routes.admin_monetization import router as admin_monetization_router
 from app.api.routes.admin_platform import router as admin_platform_router
+from app.api.routes.admin_telegram_health import router as admin_telegram_health_router
 from app.api.routes.admin_user360 import router as admin_user360_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.avatar import router as avatar_router
@@ -103,6 +104,7 @@ app.include_router(impaya_router)
 app.include_router(subscription_router)
 app.include_router(avatar_router)
 app.include_router(admin_dialogs_router)
+app.include_router(admin_telegram_health_router)
 app.include_router(admin_router)
 app.include_router(admin_explorer_router)
 app.include_router(admin_monetization_router)
@@ -176,9 +178,7 @@ async def mini_app_asset(asset_path: str):
 
 @app.get("/admin", include_in_schema=False)
 async def admin_app() -> FileResponse:
-    # Stable authenticated control center. The iframe-based shell remains available
-    # at /admin/platform for gradual migration, but can no longer recurse into itself.
-    return FileResponse("app/static/admin/index.html", headers={"Cache-Control": "no-store"})
+    return FileResponse("app/static/admin/stable.html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/admin/platform", include_in_schema=False)
