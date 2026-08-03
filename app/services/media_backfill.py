@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.db.models import Media
-from app.services.media import safe_media_path
+from app.services.media import copy_or_download_telegram_file, safe_media_path
 from app.services.telegram_bot import build_bot
 
 _SAFE_NAME = re.compile(r"[^a-zA-Z0-9._-]+")
@@ -40,11 +40,19 @@ def _failure_status(message: str, *, local_api_enabled: bool) -> str:
 
 async def restore_media_file(bot, media: Media, settings: Settings) -> tuple[str, int, str]:
     telegram_file = await bot.get_file(media.telegram_file_id)
+    if not telegram_file.file_path:
+        raise RuntimeError("Telegram getFile response does not contain file_path")
+
     filename = _filename(media, telegram_file.file_path)
     storage_key = media.storage_key or f"archive/{media.message_id}/{media.id}-{filename}"
     destination = safe_media_path(settings, storage_key)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    await bot.download_file(telegram_file.file_path, destination=destination)
+
+    await copy_or_download_telegram_file(
+        bot,
+        telegram_file.file_path,
+        destination,
+        settings,
+    )
 
     digest = hashlib.sha256()
     size = 0
