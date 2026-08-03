@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_bot_username: str = "DialogSpyBot"
     telegram_webhook_secret: str = Field(min_length=8)
+    telegram_api_base_url: str = ""
+    telegram_api_is_local: bool = False
     public_base_url: str = "http://localhost:8000"
     mini_app_url: str = "http://localhost:8000/app"
     admin_url: str = "http://localhost:8000/admin"
