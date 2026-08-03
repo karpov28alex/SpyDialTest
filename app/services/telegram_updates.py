@@ -15,7 +15,6 @@ from app.services.users import activate_business_trial, register_or_update_user
 
 
 def _as_datetime(value: Any, *, fallback: datetime | None = None) -> datetime:
-    """Normalize Telegram datetime values from aiogram or raw Unix timestamps."""
     if isinstance(value, datetime):
         return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
     if isinstance(value, (int, float)):
@@ -24,19 +23,26 @@ def _as_datetime(value: Any, *, fallback: datetime | None = None) -> datetime:
 
 
 def update_kind(payload: dict[str, Any]) -> str:
-    for key in ("business_connection", "business_message", "edited_business_message", "deleted_business_messages", "message", "callback_query"):
+    for key in (
+        "business_connection",
+        "business_message",
+        "edited_business_message",
+        "deleted_business_messages",
+        "message",
+        "callback_query",
+    ):
         if key in payload:
             return key
     return "unknown"
 
 
 async def claim_update(session: AsyncSession, update_id: int, kind: str) -> bool:
-    statement = insert(ProcessedUpdate).values(
-        update_id=update_id,
-        update_type=kind,
-        processed_at=datetime.now(UTC),
-        status="processing",
-    ).on_conflict_do_nothing(index_elements=[ProcessedUpdate.update_id]).returning(ProcessedUpdate.update_id)
+    statement = (
+        insert(ProcessedUpdate)
+        .values(update_id=update_id, update_type=kind, processed_at=datetime.now(UTC), status="processing")
+        .on_conflict_do_nothing(index_elements=[ProcessedUpdate.update_id])
+        .returning(ProcessedUpdate.update_id)
+    )
     return (await session.scalar(statement)) is not None
 
 
@@ -158,6 +164,31 @@ def _media_from_message(event: TgMessage) -> list[dict[str, Any]]:
     return result
 
 
+async def _sync_message_media(session: AsyncSession, message: Message, event: TgMessage) -> list[Media]:
+    """Append media variants that Telegram reports for a message.
+
+    Old media rows are intentionally retained. This preserves an audit trail when an
+    edited Business message replaces a photo/video/document while keeping its caption.
+    """
+    existing = list((await session.scalars(select(Media).where(Media.message_id == message.id))).all())
+    known = {
+        (row.telegram_unique_file_id or "", row.media_type or "")
+        for row in existing
+    }
+    created: list[Media] = []
+    for data in _media_from_message(event):
+        key = (data.get("telegram_unique_file_id") or "", data.get("media_type") or "")
+        if key in known:
+            continue
+        row = Media(message_id=message.id, **data)
+        session.add(row)
+        created.append(row)
+        known.add(key)
+    if created:
+        await session.flush()
+    return created
+
+
 async def save_business_message(session: AsyncSession, event: TgMessage) -> tuple[Message | None, bool]:
     if not event.business_connection_id:
         return None, False
@@ -173,6 +204,8 @@ async def save_business_message(session: AsyncSession, event: TgMessage) -> tupl
         )
     )
     if existing:
+        # A duplicate delivery may contain media omitted from the first delivery.
+        await _sync_message_media(session, existing, event)
         return existing, False
     direction = "outgoing" if event.from_user and event.from_user.id == connection.business_user_id else "incoming"
     sent_at = _as_datetime(event.date)
@@ -198,8 +231,7 @@ async def save_business_message(session: AsyncSession, event: TgMessage) -> tupl
         caption=message.caption,
         created_at=sent_at,
     ))
-    for data in _media_from_message(event):
-        session.add(Media(message_id=message.id, **data))
+    await _sync_message_media(session, message, event)
     connection.last_activity_at = datetime.now(UTC)
     return message, True
 
@@ -220,8 +252,12 @@ async def edit_business_message(session: AsyncSession, event: TgMessage) -> tupl
     if message is None:
         message, _ = await save_business_message(session, event)
         return message, False, None
-    if message.text == event.text and message.caption == event.caption:
+
+    new_media = await _sync_message_media(session, message, event)
+    content_changed = message.text != event.text or message.caption != event.caption
+    if not content_changed and not new_media:
         return message, False, None
+
     old_content = message.text or message.caption
     edited_at = _as_datetime(event.edit_date, fallback=datetime.now(UTC))
     current_version = int(
