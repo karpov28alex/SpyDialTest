@@ -6,7 +6,7 @@ from pathlib import Path
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from redis.asyncio import Redis
 from sqlalchemy import text
 
@@ -50,12 +50,10 @@ _original_user_menu = admin_console_module.user_menu
 def _user_menu_with_stats(admin: bool) -> InlineKeyboardMarkup:
     original = _original_user_menu(admin)
     rows = [list(row) for row in original.inline_keyboard]
-    status_row = [
+    rows.insert(1 if rows else 0, [
         InlineKeyboardButton(text="📊 Статистика", callback_data="intel:summary"),
         InlineKeyboardButton(text="🔐 Доступ", callback_data="user:access"),
-    ]
-    insert_at = 1 if rows else 0
-    rows.insert(insert_at, status_row)
+    ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -89,7 +87,13 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Dialog Spy API", version=settings.app_version, lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_origins), allow_credentials=True, allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"], allow_headers=["Authorization", "Content-Type", "X-Correlation-ID"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=list(settings.cors_origins),
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type", "X-Correlation-ID"],
+)
 app.include_router(auth_router)
 app.include_router(user_router)
 app.include_router(access_center_router)
@@ -118,14 +122,18 @@ async def correlation_middleware(request: Request, call_next):
     correlation_id = request.headers.get("x-correlation-id") or uuid.uuid4().hex
     response = await call_next(request)
     response.headers["X-Correlation-ID"] = correlation_id
-    if request.url.path in {"/app", "/admin"}:
-        response.headers["Cache-Control"] = "no-store"
+    if request.url.path.startswith(("/app", "/admin")):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
     return response
 
 
 @app.exception_handler(Exception)
 async def unhandled_error(request: Request, _: Exception) -> JSONResponse:
-    return JSONResponse(status_code=500, content={"error": {"code": "INTERNAL_ERROR", "message": "Внутренняя ошибка", "details": {}, "correlation_id": request.headers.get("x-correlation-id", "unknown")}})
+    return JSONResponse(
+        status_code=500,
+        content={"error": {"code": "INTERNAL_ERROR", "message": "Внутренняя ошибка", "details": {}, "correlation_id": request.headers.get("x-correlation-id", "unknown")}},
+    )
 
 
 @app.get("/health/live")
@@ -168,12 +176,24 @@ async def mini_app_asset(asset_path: str):
 
 @app.get("/admin", include_in_schema=False)
 async def admin_app() -> FileResponse:
+    # Stable authenticated control center. The iframe-based shell remains available
+    # at /admin/platform for gradual migration, but can no longer recurse into itself.
+    return FileResponse("app/static/admin/index.html", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/admin/platform", include_in_schema=False)
+async def admin_platform_shell() -> FileResponse:
     return FileResponse("app/static/admin/unified.html", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/admin/dialogs", include_in_schema=False)
+async def admin_dialog_viewer() -> FileResponse:
+    return FileResponse("app/static/admin/dialogs-media.html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/admin/{asset_path:path}", include_in_schema=False)
 async def admin_asset(asset_path: str):
     path = Path("app/static/admin") / asset_path
     if not path.is_file():
-        return FileResponse("app/static/admin/unified.html", headers={"Cache-Control": "no-store"})
+        return RedirectResponse(url="/admin", status_code=307)
     return FileResponse(path, headers={"Cache-Control": "no-store"})
