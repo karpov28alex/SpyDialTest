@@ -6,13 +6,13 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-from aiogram import Bot
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.db.models import Media
 from app.services.media import safe_media_path
+from app.services.telegram_bot import build_bot
 
 _SAFE_NAME = re.compile(r"[^a-zA-Z0-9._-]+")
 
@@ -29,7 +29,16 @@ def _filename(media: Media, telegram_path: str | None) -> str:
     return f"media-{media.id}{suffix}"
 
 
-async def restore_media_file(bot: Bot, media: Media, settings: Settings) -> tuple[str, int, str]:
+def _failure_status(message: str, *, local_api_enabled: bool) -> str:
+    lowered = message.lower()
+    if "wrong file_id" in lowered or "temporarily unavailable" in lowered:
+        return "unavailable"
+    if "file is too big" in lowered:
+        return "failed" if local_api_enabled else "requires_local_api"
+    return "failed"
+
+
+async def restore_media_file(bot, media: Media, settings: Settings) -> tuple[str, int, str]:
     telegram_file = await bot.get_file(media.telegram_file_id)
     filename = _filename(media, telegram_file.file_path)
     storage_key = media.storage_key or f"archive/{media.message_id}/{media.id}-{filename}"
@@ -53,10 +62,14 @@ async def backfill_media(
     limit: int = 50,
     include_missing_files: bool = True,
 ) -> dict[str, object]:
+    retry_statuses = ["pending", "failed", "error"]
+    if settings.telegram_api_base_url and settings.telegram_api_is_local:
+        retry_statuses.append("requires_local_api")
+
     rows = list((await session.scalars(
         select(Media)
         .where(or_(
-            Media.download_status.in_(["pending", "failed", "error"]),
+            Media.download_status.in_(retry_statuses),
             Media.storage_key.is_(None),
         ))
         .order_by(Media.id)
@@ -86,8 +99,11 @@ async def backfill_media(
 
     restored = 0
     failed = 0
+    unavailable = 0
+    requires_local_api = 0
     errors: list[dict[str, object]] = []
-    bot = Bot(settings.telegram_bot_token)
+    bot = build_bot(settings)
+    local_api_enabled = bool(settings.telegram_api_base_url and settings.telegram_api_is_local)
     try:
         for media in rows:
             try:
@@ -101,9 +117,15 @@ async def backfill_media(
                 media.downloaded_at = datetime.now(UTC)
                 restored += 1
             except Exception as exc:  # one broken Telegram file must not stop the archive
-                media.download_status = "failed"
-                failed += 1
-                errors.append({"media_id": media.id, "error": str(exc)[:500]})
+                status = _failure_status(str(exc), local_api_enabled=local_api_enabled)
+                media.download_status = status
+                if status == "unavailable":
+                    unavailable += 1
+                elif status == "requires_local_api":
+                    requires_local_api += 1
+                else:
+                    failed += 1
+                errors.append({"media_id": media.id, "status": status, "error": str(exc)[:500]})
             await session.commit()
     finally:
         await bot.session.close()
@@ -112,5 +134,7 @@ async def backfill_media(
         "selected": len(rows),
         "restored": restored,
         "failed": failed,
+        "unavailable": unavailable,
+        "requires_local_api": requires_local_api,
         "errors": errors[:20],
     }
