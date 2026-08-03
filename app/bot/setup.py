@@ -1,12 +1,11 @@
-from aiogram import Bot, Dispatcher, F
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram import Dispatcher, F
 from aiogram.filters import Command
 
 from app.core.config import get_settings
+from app.services.telegram_bot import build_bot
 
 settings = get_settings()
-bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = build_bot(settings)
 dispatcher = Dispatcher()
 
 # Specific handlers are registered before generic routers.
