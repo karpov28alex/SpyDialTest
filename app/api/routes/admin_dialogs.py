@@ -1,14 +1,17 @@
+from __future__ import annotations
+
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, or_, select
 
 from app.api.routes.admin import AdminAuth, Session
 from app.core.config import Settings, get_settings
 from app.core.security import create_token, decode_token
-from app.db.models import Dialog, Media, Message, MessageVersion
+from app.db.models import Dialog, Media, Message, MessageVersion, User
 from app.services.media import safe_media_path
+from app.services.media_backfill import backfill_media
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -40,14 +43,9 @@ def _media_kind(item: Media) -> str:
     raw = (item.media_type or "").strip().lower().replace("-", "_")
     mime = (item.mime_type or "").lower()
     aliases = {
-        "voice_message": "voice",
-        "voice_note": "voice",
-        "video_message": "video_note",
-        "round_video": "video_note",
-        "video_circle": "video_note",
-        "gif": "animation",
-        "image": "photo",
-        "file": "document",
+        "voice_message": "voice", "voice_note": "voice",
+        "video_message": "video_note", "round_video": "video_note", "video_circle": "video_note",
+        "gif": "animation", "image": "photo", "file": "document",
     }
     raw = aliases.get(raw, raw)
     if raw:
@@ -64,12 +62,12 @@ def _media_kind(item: Media) -> str:
 def _stream_url(item: Media, settings: Settings) -> str | None:
     if item.download_status != "downloaded" or not item.storage_key:
         return None
-    token = create_token(
-        str(item.id),
-        "admin_media_download",
-        timedelta(seconds=settings.media_signing_ttl_seconds),
-        settings,
-    )
+    try:
+        if not safe_media_path(settings, item.storage_key).is_file():
+            return None
+    except ValueError:
+        return None
+    token = create_token(str(item.id), "admin_media_download", timedelta(seconds=settings.media_signing_ttl_seconds), settings)
     return f"/api/admin/media/stream/{token}"
 
 
@@ -91,11 +89,7 @@ def _serialize_media(item: Media, settings: Settings) -> dict:
 
 
 @router.get("/media/stream/{token}", include_in_schema=False)
-async def stream_admin_media(
-    token: str,
-    session: Session,
-    settings: Settings = Depends(get_settings),
-):
+async def stream_admin_media(token: str, session: Session, settings: Settings = Depends(get_settings)):
     try:
         media_id = int(decode_token(token, "admin_media_download", settings))
     except (ValueError, TypeError) as exc:
@@ -111,29 +105,101 @@ async def stream_admin_media(
         media_type=media.mime_type or "application/octet-stream",
         filename=media.filename or f"media-{media.id}",
         content_disposition_type="inline",
-        headers={"Cache-Control": "private, max-age=300"},
+        headers={"Cache-Control": "private, max-age=300", "Accept-Ranges": "bytes"},
     )
+
+
+@router.get("/dialog-archive/users")
+async def archive_users(
+    _: AdminAuth,
+    session: Session,
+    search: str = "",
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> dict:
+    message_count = func.count(Message.id)
+    dialog_count = func.count(func.distinct(Dialog.id))
+    query = (
+        select(User, dialog_count.label("dialogs_count"), message_count.label("messages_count"), func.max(Message.sent_at).label("last_message_at"))
+        .join(Dialog, Dialog.owner_user_id == User.id)
+        .join(Message, Message.dialog_id == Dialog.id)
+        .group_by(User.id)
+    )
+    term = search.strip()
+    if term:
+        conditions = [User.username.ilike(f"%{term}%"), User.first_name.ilike(f"%{term}%"), User.last_name.ilike(f"%{term}%")]
+        if term.isdigit():
+            conditions.append(User.telegram_id == int(term))
+        query = query.where(or_(*conditions))
+    rows = (await session.execute(query.order_by(desc("last_message_at")).offset(offset).limit(limit))).all()
+    total_query = select(func.count(func.distinct(User.id))).join(Dialog, Dialog.owner_user_id == User.id).join(Message, Message.dialog_id == Dialog.id)
+    if term:
+        conditions = [User.username.ilike(f"%{term}%"), User.first_name.ilike(f"%{term}%"), User.last_name.ilike(f"%{term}%")]
+        if term.isdigit():
+            conditions.append(User.telegram_id == int(term))
+        total_query = total_query.where(or_(*conditions))
+    total = int(await session.scalar(total_query) or 0)
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "items": [{
+            "id": user.id,
+            "telegram_id": user.telegram_id,
+            "username": user.username,
+            "name": " ".join(part for part in (user.first_name, user.last_name) if part),
+            "dialogs_count": int(dialogs_count or 0),
+            "messages_count": int(messages_count or 0),
+            "last_message_at": last_message_at.isoformat() if last_message_at else None,
+        } for user, dialogs_count, messages_count, last_message_at in rows],
+    }
+
+
+@router.get("/media/archive-stats")
+async def media_archive_stats(_: AdminAuth, session: Session, settings: Settings = Depends(get_settings)) -> dict:
+    rows = list((await session.scalars(select(Media))).all())
+    downloaded = missing = pending = failed = 0
+    for item in rows:
+        if item.download_status == "downloaded" and item.storage_key:
+            try:
+                exists = safe_media_path(settings, item.storage_key).is_file()
+            except ValueError:
+                exists = False
+            if exists:
+                downloaded += 1
+            else:
+                missing += 1
+        elif item.download_status in {"failed", "error"}:
+            failed += 1
+        else:
+            pending += 1
+    return {"total": len(rows), "downloaded": downloaded, "missing": missing, "pending": pending, "failed": failed}
+
+
+@router.post("/media/backfill")
+async def run_media_backfill(
+    _: AdminAuth,
+    session: Session,
+    settings: Settings = Depends(get_settings),
+    limit: int = Query(50, ge=1, le=200),
+) -> dict:
+    return await backfill_media(session, settings, limit=limit, include_missing_files=True)
 
 
 @router.get("/users/{user_id}/dialogs")
 async def user_dialogs(user_id: int, _: AdminAuth, session: Session) -> dict:
     rows = list((await session.scalars(
-        select(Dialog)
-        .where(Dialog.owner_user_id == user_id)
-        .order_by(desc(Dialog.last_message_at), desc(Dialog.id))
+        select(Dialog).where(Dialog.owner_user_id == user_id).order_by(desc(Dialog.last_message_at), desc(Dialog.id))
     )).all())
     groups: dict[tuple[str, int], list[Dialog]] = {}
     for row in rows:
         peer_value = row.peer_telegram_id if row.peer_telegram_id is not None else row.telegram_chat_id
         key = ("peer" if row.peer_telegram_id is not None else "chat", int(peer_value))
         groups.setdefault(key, []).append(row)
-
     items = []
     for group in groups.values():
         dialog_ids = [row.id for row in group]
-        count = int(await session.scalar(
-            select(func.count(Message.id)).where(Message.dialog_id.in_(dialog_ids))
-        ) or 0)
+        count = int(await session.scalar(select(func.count(Message.id)).where(Message.dialog_id.in_(dialog_ids))) or 0)
         latest, display_name, username = _display_dialog(group)
         avatar_row = next((row for row in group if row.avatar), latest)
         items.append({
@@ -160,38 +226,24 @@ async def dialog_messages(
     _: AdminAuth,
     session: Session,
     settings: Settings = Depends(get_settings),
-    limit: int = Query(500, ge=1, le=1000),
+    limit: int = Query(200, ge=1, le=500),
+    before_id: int | None = Query(None, ge=1),
 ) -> dict:
     dialog = await session.get(Dialog, dialog_id)
     if not dialog:
         raise HTTPException(status_code=404, detail="Dialog not found")
-
-    matching_dialogs = list((await session.scalars(
-        select(Dialog).where(
-            Dialog.owner_user_id == dialog.owner_user_id,
-            _peer_condition(dialog),
-        )
-    )).all())
-    if not matching_dialogs:
-        matching_dialogs = [dialog]
+    matching_dialogs = list((await session.scalars(select(Dialog).where(Dialog.owner_user_id == dialog.owner_user_id, _peer_condition(dialog)))).all()) or [dialog]
     dialog_ids = [row.id for row in matching_dialogs]
-    rows = list((await session.scalars(
-        select(Message)
-        .where(Message.dialog_id.in_(dialog_ids))
-        .order_by(Message.sent_at, Message.id)
-        .limit(limit)
-    )).all())
-
+    query = select(Message).where(Message.dialog_id.in_(dialog_ids))
+    if before_id:
+        query = query.where(Message.id < before_id)
+    newest_first = list((await session.scalars(query.order_by(desc(Message.sent_at), desc(Message.id)).limit(limit + 1))).all())
+    has_more = len(newest_first) > limit
+    rows = list(reversed(newest_first[:limit]))
     result = []
     for message in rows:
-        versions = list((await session.scalars(
-            select(MessageVersion)
-            .where(MessageVersion.message_id == message.id)
-            .order_by(MessageVersion.version_number)
-        )).all())
-        media = list((await session.scalars(
-            select(Media).where(Media.message_id == message.id).order_by(Media.id)
-        )).all())
+        versions = list((await session.scalars(select(MessageVersion).where(MessageVersion.message_id == message.id).order_by(MessageVersion.version_number))).all())
+        media = list((await session.scalars(select(Media).where(Media.message_id == message.id).order_by(Media.id))).all())
         result.append({
             "id": message.id,
             "telegram_message_id": message.telegram_message_id,
@@ -203,15 +255,9 @@ async def dialog_messages(
             "deleted_at": message.deleted_at.isoformat() if message.deleted_at else None,
             "is_deleted": message.is_deleted,
             "reply_to_message_id": message.reply_to_message_id,
-            "versions": [{
-                "number": version.version_number,
-                "text": version.text,
-                "caption": version.caption,
-                "created_at": version.created_at.isoformat(),
-            } for version in versions] if message.edited_at else [],
+            "versions": [{"number": v.version_number, "text": v.text, "caption": v.caption, "created_at": v.created_at.isoformat()} for v in versions] if message.edited_at else [],
             "media": [_serialize_media(item, settings) for item in media],
         })
-
     latest, display_name, username = _display_dialog(matching_dialogs)
     avatar_row = next((row for row in matching_dialogs if row.avatar), latest)
     return {
@@ -226,4 +272,6 @@ async def dialog_messages(
             "avatar": avatar_row.avatar or latest.avatar,
         },
         "items": result,
+        "has_more": has_more,
+        "next_before_id": rows[0].id if has_more and rows else None,
     }
