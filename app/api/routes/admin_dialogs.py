@@ -45,6 +45,48 @@ def _display_dialog(group: list[Dialog]) -> tuple[Dialog, str, str | None]:
     return latest, display_name, username
 
 
+def _media_kind(item: Media) -> str:
+    raw = (item.media_type or "").strip().lower().replace("-", "_")
+    mime = (item.mime_type or "").lower()
+    aliases = {
+        "voice_message": "voice",
+        "voice_note": "voice",
+        "video_message": "video_note",
+        "round_video": "video_note",
+        "video_circle": "video_note",
+        "gif": "animation",
+        "image": "photo",
+        "file": "document",
+    }
+    raw = aliases.get(raw, raw)
+    if raw:
+        return raw
+    if mime.startswith("image/"):
+        return "photo"
+    if mime.startswith("video/"):
+        return "video"
+    if mime.startswith("audio/"):
+        return "audio"
+    return "document"
+
+
+def _serialize_media(item: Media, settings: Settings) -> dict:
+    return {
+        "id": item.id,
+        "type": item.media_type,
+        "kind": _media_kind(item),
+        "mime_type": item.mime_type,
+        "protected": item.is_protected,
+        "status": item.download_status,
+        "filename": item.filename,
+        "size": item.size,
+        "duration": item.duration,
+        "width": item.width,
+        "height": item.height,
+        "url": media_url(item, settings),
+    }
+
+
 @router.get("/users/{user_id}/dialogs")
 async def user_dialogs(user_id: int, _: AdminAuth, session: Session) -> dict:
     rows = list((await session.scalars(
@@ -132,21 +174,14 @@ async def dialog_messages(
             "edited_at": message.edited_at.isoformat() if message.edited_at else None,
             "deleted_at": message.deleted_at.isoformat() if message.deleted_at else None,
             "is_deleted": message.is_deleted,
+            "reply_to_message_id": message.reply_to_message_id,
             "versions": [{
                 "number": version.version_number,
                 "text": version.text,
                 "caption": version.caption,
                 "created_at": version.created_at.isoformat(),
             } for version in versions] if message.edited_at else [],
-            "media": [{
-                "id": item.id,
-                "type": item.media_type,
-                "protected": item.is_protected,
-                "status": item.download_status,
-                "filename": item.filename,
-                "size": item.size,
-                "url": media_url(item, settings),
-            } for item in media],
+            "media": [_serialize_media(item, settings) for item in media],
         })
 
     latest, display_name, username = _display_dialog(matching_dialogs)
