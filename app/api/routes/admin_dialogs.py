@@ -1,9 +1,14 @@
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlalchemy import desc, func, select
 
-from app.api.routes.admin import AdminAuth, Session, media_url
+from app.api.routes.admin import AdminAuth, Session
 from app.core.config import Settings, get_settings
+from app.core.security import create_token, decode_token
 from app.db.models import Dialog, Media, Message, MessageVersion
+from app.services.media import safe_media_path
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -20,23 +25,9 @@ def _clean_username(value: str | None) -> str | None:
 
 
 def _display_dialog(group: list[Dialog]) -> tuple[Dialog, str, str | None]:
-    """Choose the richest peer identity and prefer @username in the admin UI."""
-    latest = max(
-        group,
-        key=lambda row: (
-            row.last_message_at is not None,
-            row.last_message_at,
-            row.id,
-        ),
-    )
-    username_row = next(
-        (row for row in group if _clean_username(row.peer_username)),
-        None,
-    )
-    name_row = next(
-        (row for row in group if (row.peer_name or "").strip()),
-        None,
-    )
+    latest = max(group, key=lambda row: (row.last_message_at is not None, row.last_message_at, row.id))
+    username_row = next((row for row in group if _clean_username(row.peer_username)), None)
+    name_row = next((row for row in group if (row.peer_name or "").strip()), None)
     identity = username_row or name_row or latest
     username = _clean_username(identity.peer_username)
     peer_id = identity.peer_telegram_id or latest.peer_telegram_id or latest.telegram_chat_id
@@ -70,6 +61,18 @@ def _media_kind(item: Media) -> str:
     return "document"
 
 
+def _stream_url(item: Media, settings: Settings) -> str | None:
+    if item.download_status != "downloaded" or not item.storage_key:
+        return None
+    token = create_token(
+        str(item.id),
+        "admin_media_download",
+        timedelta(seconds=settings.media_signing_ttl_seconds),
+        settings,
+    )
+    return f"/api/admin/media/stream/{token}"
+
+
 def _serialize_media(item: Media, settings: Settings) -> dict:
     return {
         "id": item.id,
@@ -83,8 +86,33 @@ def _serialize_media(item: Media, settings: Settings) -> dict:
         "duration": item.duration,
         "width": item.width,
         "height": item.height,
-        "url": media_url(item, settings),
+        "url": _stream_url(item, settings),
     }
+
+
+@router.get("/media/stream/{token}", include_in_schema=False)
+async def stream_admin_media(
+    token: str,
+    session: Session,
+    settings: Settings = Depends(get_settings),
+):
+    try:
+        media_id = int(decode_token(token, "admin_media_download", settings))
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=403, detail="Invalid media token") from exc
+    media = await session.get(Media, media_id)
+    if not media or media.download_status != "downloaded" or not media.storage_key:
+        raise HTTPException(status_code=404, detail="Media not found")
+    path = safe_media_path(settings, media.storage_key)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Media file missing")
+    return FileResponse(
+        path,
+        media_type=media.mime_type or "application/octet-stream",
+        filename=media.filename or f"media-{media.id}",
+        content_disposition_type="inline",
+        headers={"Cache-Control": "private, max-age=300"},
+    )
 
 
 @router.get("/users/{user_id}/dialogs")
