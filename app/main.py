@@ -40,6 +40,7 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import engine
 from app.services.funnel_scheduler import funnel_scheduler_loop
+from app.services.media_recovery_scheduler import media_recovery_loop
 
 settings = get_settings()
 configure_logging()
@@ -78,12 +79,15 @@ access_funnel_module.expired_keyboard = _expired_keyboard_with_impaya
 async def lifespan(_: FastAPI):
     settings.media_root.mkdir(parents=True, exist_ok=True)
     funnel_task = asyncio.create_task(funnel_scheduler_loop(), name="access-funnel-scheduler")
+    media_task = asyncio.create_task(media_recovery_loop(), name="telegram-media-recovery")
     try:
         yield
     finally:
-        funnel_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await funnel_task
+        for task in (funnel_task, media_task):
+            task.cancel()
+        for task in (funnel_task, media_task):
+            with suppress(asyncio.CancelledError):
+                await task
         await engine.dispose()
 
 
